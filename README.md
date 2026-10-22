@@ -20,13 +20,18 @@ label; this is not LangChain's hosted Managed Deep Agents service.
 
 ## Current state
 
-Planning documents and infrastructure definitions are prepared. The Condere agent,
-SmolVM adapter, assessment API, and MCP client are not implemented on this branch.
-Langfuse and SmolVM have not been launched or demonstrated by this change. No paid
-assessment has run. See the [handoff](roadmap.md#current-handoff) for checked scope
-and the next action.
+The local SmolVM adapter runs isolated commands and file operations through Deep
+Agents. A deterministic test model discovers all six research skills and uses the
+real VM; all 17 question-specific guides are preserved. Public repository
+acquisition records an exact commit and verifies the same source inside the VM.
+These checks demonstrate infrastructure behavior, not a real assessment.
 
-`codex/condere-mda` has an independent Git history. The existing Agno implementation
-and its uncommitted work remain in their existing branches/worktrees. This branch
-does not import or run that application. Selected research methods and contracts
-will be ported through the backlog; do not merge the legacy tree wholesale.
+Langfuse configuration and image pins are prepared, but its launch is blocked by
+the current Docker disk limit. Assessment persistence, spending controls, research
+tools, final review/report delivery, API/MCP, and actual client use remain
+unfinished. No paid assessment has run. See the [handoff](roadmap.md#current-handoff)
+for the active goal and next actions.
+
+`codex/condere-mda` has independent Git history. The original Agno implementation
+and its uncommitted work remain in their existing branches/worktrees. Port useful
+methods and contracts deliberately; do not merge the legacy tree wholesale.

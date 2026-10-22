@@ -1,0 +1,519 @@
+{
+  "M1": {
+    "id": "M1",
+    "stage": "market",
+    "question": "Who experiences the problem, and who pays to solve it?",
+    "required_fields": [
+      "segment",
+      "user",
+      "buyer",
+      "task",
+      "trigger"
+    ],
+    "completion_rule": "Distinguish the user from the buyer and source-backed facts from customer hypotheses.",
+    "allow_unavailable": false,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Choose the customer, user and buyer whose task deserves investigation.",
+      "evidence_needed": "Accounts of the task in the target segment, who performs it, who controls purchases and what triggers the need.",
+      "search_routes": [
+        "Target-segment customer accounts and documented workflows.",
+        "Purchasing or role descriptions tied to that task; compare with the founder's proposed customer."
+      ],
+      "weak_signals": "Vendor targeting and a founder's persona describe intended customers, not demonstrated buyers.",
+      "completion": "Identify the roles and trigger with attribution; label unverified roles as customer hypotheses and name the missing observation."
+    }
+  },
+  "M2": {
+    "id": "M2",
+    "stage": "market",
+    "question": "How painful and frequent is the problem?",
+    "required_fields": [
+      "frequency",
+      "consequences",
+      "workarounds"
+    ],
+    "completion_rule": "Attribute customer pain and frequency; do not invent monetary or time losses.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Decide whether the customer problem is important enough to test.",
+      "evidence_needed": "Concrete incidents, consequences and workarounds in the target segment. Frequency or population claims need a suitable sample, period and method.",
+      "search_routes": [
+        "Firsthand customer accounts, product reviews or issue discussions describing a specific incident and consequence.",
+        "Relevant surveys, operational records or studies with a stated population, period and collection method.",
+        "Contrary accounts where the existing workaround is adequate or the problem is infrequent."
+      ],
+      "weak_signals": "A template or how-to article explains a workflow, not pain frequency. Vendor anecdotes and self-selected complaints cannot establish prevalence or measured losses.",
+      "completion": "Attribute qualitative pain to the people or sources observed. Quantify only what the evidence measures; mark frequency, severity or losses unresolved when not established."
+    }
+  },
+  "M3": {
+    "id": "M3",
+    "stage": "market",
+    "question": "Is demand established, emerging, or mostly attention?",
+    "required_fields": [
+      "signals",
+      "period",
+      "population",
+      "counterevidence"
+    ],
+    "completion_rule": "Separate discussion, adoption, purchasing and retention; trace reposts to their origin and require a comparable baseline for growth.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Distinguish attention from demonstrated demand for the customer task.",
+      "evidence_needed": "Dated evidence of adoption, actual use, purchasing or retention with the relevant population and a comparable baseline for any growth claim.",
+      "search_routes": [
+        "Customer implementation accounts and documented purchasing or usage disclosures, retaining who reported them.",
+        "Original datasets or reports behind adoption claims; inspect the period, denominator and method.",
+        "Abandonment, churn, failed adoption or contrary demand evidence for the same segment."
+      ],
+      "weak_signals": "Posts, likes, searches, waitlists and repeated articles indicate attention. Vendor customer counts remain attributed claims; purchases of alternatives do not prove demand for our offering.",
+      "completion": "Name the strongest supported signal and its scope. Report attention as attention and missing purchasing evidence as unresolved; do not turn a bounded unsuccessful search into proof of no demand."
+    }
+  },
+  "M4": {
+    "id": "M4",
+    "stage": "market",
+    "question": "How do customers solve this today?",
+    "required_fields": [
+      "alternatives",
+      "selection_rationale",
+      "exclusions"
+    ],
+    "completion_rule": "Include substitutes, internal work and doing nothing; justify one to three relevant competitors or explain why none qualifies.",
+    "allow_unavailable": false,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Select relevant alternatives for the same customer task and a useful Technical comparison.",
+      "evidence_needed": "How the target customer solves the task today, including products, manual work, internal tools and doing nothing; authoritative product or repository locations.",
+      "search_routes": [
+        "Customer descriptions of current workarounds and product documentation for the same task.",
+        "Official product and repository pages for candidate competitors; verify inclusion against the task."
+      ],
+      "weak_signals": "A generic competitor list or a popular adjacent product does not establish relevance. Advertised positioning does not establish superiority.",
+      "completion": "Justify up to three relevant competitors and exclusions, or explain why none qualifies. Preserve sources, known versions and unresolved comparison values."
+    }
+  },
+  "M5": {
+    "id": "M5",
+    "stage": "market",
+    "question": "What would make customers switch or stay?",
+    "required_fields": [
+      "unmet_needs",
+      "existing_strengths",
+      "switching_barriers"
+    ],
+    "completion_rule": "Attribute reasons to switch and stay to the selected customer task; a feature request is not a purchase commitment.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Identify a credible reason to switch and what may prevent switching.",
+      "evidence_needed": "Customer explanations of unmet needs, valued existing features, migration effort, procurement constraints and reasons to stay.",
+      "search_routes": [
+        "Customer migration accounts, detailed reviews and issue discussions for the selected alternatives.",
+        "Official migration, interoperability and contract terms; look for satisfied customers and failed switches too."
+      ],
+      "weak_signals": "Feature requests and complaints do not demonstrate willingness to switch or pay. Vendor comparisons may omit strengths and switching costs.",
+      "completion": "Attribute reasons to switch and stay to the relevant task, and separate observed migrations from proposed differentiation."
+    }
+  },
+  "M6": {
+    "id": "M6",
+    "stage": "market",
+    "question": "What do customers currently pay, and what might they pay us?",
+    "required_fields": [
+      "published_prices",
+      "billing_conditions",
+      "purchase_evidence",
+      "price_hypothesis"
+    ],
+    "completion_rule": "Separate listed prices, actual spending, stated willingness and commitments; compare currency, period, usage and tier conditions explicitly.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Separate existing spending from a price hypothesis for the proposed offering.",
+      "evidence_needed": "Current price and billing conditions, documented customer spending, or clearly attributed statements and commitments about buying. These are distinct evidence types.",
+      "search_routes": [
+        "Official pricing and terms for the relevant alternative, tier, currency, billing period and usage level.",
+        "Customer procurement records, spending accounts or purchase disclosures when publicly available.",
+        "Original customer statements or commitments about the proposed task or offering, keeping hypothetical responses separate from transactions."
+      ],
+      "weak_signals": "An advertised price is not an actual purchase. Competitor spending, stated willingness and free signups do not establish willingness to pay for our product.",
+      "completion": "Report each supported price or spending category separately. Label our price as a hypothesis unless directly supported, and identify the customer test needed for missing purchasing evidence."
+    }
+  },
+  "M7": {
+    "id": "M7",
+    "stage": "market",
+    "question": "How large is the realistically reachable opportunity?",
+    "required_fields": [
+      "eligible_customers",
+      "exclusions",
+      "spending_basis",
+      "reach_assumptions"
+    ],
+    "completion_rule": "Show geography, period and reproducible bottom-up ranges; capture rates are assumptions and unavailable inputs cannot become precise market values.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Estimate a realistically reachable opportunity within the chosen scope.",
+      "evidence_needed": "Eligible customer counts, exclusions, geography, period and a comparable spending basis, with explicit reach assumptions.",
+      "search_routes": [
+        "Official statistics, registries or industry datasets matching the target segment and geography.",
+        "Original methodology behind population counts and the already reviewed spending evidence."
+      ],
+      "weak_signals": "A broad market headline or arbitrary capture percentage does not establish reachable demand. Counts from different periods or definitions are not interchangeable.",
+      "completion": "Provide reproducible low/base/high ranges with units and assumptions, or identify unavailable required inputs without inventing a precise market value."
+    }
+  },
+  "M8": {
+    "id": "M8",
+    "stage": "market",
+    "question": "How do customers discover, evaluate and purchase solutions?",
+    "required_fields": [
+      "channels",
+      "buying_trigger",
+      "decision_makers",
+      "purchase_steps"
+    ],
+    "completion_rule": "Attribute buyer behavior and identify unknown conversion or sales-cycle measurements without initiating outreach.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Choose plausible ways to reach buyers and understand their buying process.",
+      "evidence_needed": "Where target customers discover, evaluate and purchase solutions; buying triggers, approval roles and observed timing.",
+      "search_routes": [
+        "Customer buying accounts and relevant procurement guidance.",
+        "Segment-specific communities, marketplaces and channel records; distinguish presence from measured conversion."
+      ],
+      "weak_signals": "Audience size, ad availability and a vendor's sales funnel do not establish customer acquisition or a measured sales cycle.",
+      "completion": "Describe a sourced buying path or an explicit channel hypothesis, with the missing observation needed to test it."
+    }
+  },
+  "B1": {
+    "id": "B1",
+    "stage": "business",
+    "question": "Which customer and use case should we serve first?",
+    "required_fields": [
+      "segment",
+      "use_case",
+      "promised_outcome",
+      "priority_reason",
+      "excluded_scope"
+    ],
+    "completion_rule": "Make one qualified initial offering with a measurable proposed customer outcome and explicit exclusions.",
+    "allow_unavailable": false,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Define an initial offering connected to a specific customer problem.",
+      "evidence_needed": "Reviewed customer task, problem, alternatives and the founder's constraints, including any required unresolved evidence.",
+      "search_routes": [
+        "Reuse reviewed Market findings before researching additional features.",
+        "Inspect relevant product documentation only for a named gap in the proposed minimum offering."
+      ],
+      "weak_signals": "A feature list, competitor popularity or agent preference does not validate the proposed offering.",
+      "completion": "Describe a bounded offering and intended outcome as a proposal, retaining the customer assumptions and required gaps that limit it."
+    }
+  },
+  "B2": {
+    "id": "B2",
+    "stage": "business",
+    "question": "What would be free, paid and open source?",
+    "required_fields": [
+      "open_core",
+      "paid_value",
+      "billing_unit",
+      "license_approach"
+    ],
+    "completion_rule": "Connect paid value to a buyer need; keep pricing and license suitability provisional where unverified.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Propose what is open source, free and paid, and the charging unit.",
+      "evidence_needed": "Buyer needs, reviewed pricing conditions, relevant license terms and constraints on the proposed open-core model.",
+      "search_routes": [
+        "Reuse buyer and pricing evidence; inspect official feature tiers, billing terms and licenses where relevant.",
+        "Look for how the paid portion creates value for the identified buyer rather than copying a competitor's packaging."
+      ],
+      "weak_signals": "An existing open-core business does not prove our packaging will sell or that a license is suitable.",
+      "completion": "Explain a provisional free/paid boundary and billing unit, with unresolved purchasing and license assumptions explicit."
+    }
+  },
+  "B3": {
+    "id": "B3",
+    "stage": "business",
+    "question": "Can we serve customers profitably?",
+    "required_fields": [
+      "revenue_basis",
+      "variable_costs",
+      "fixed_costs",
+      "acquisition_costs",
+      "sensitivity"
+    ],
+    "completion_rule": "Use reproducible low/base/high usage calculations; distinguish measured costs, prices and assumptions; unknown costs cannot establish profitability.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Determine the conditions under which serving customers could be profitable.",
+      "evidence_needed": "Comparable revenue, usage, provider prices, variable costs, support, payment costs, fixed costs and acquisition assumptions.",
+      "search_routes": [
+        "Reuse reviewed Technical operating requirements and Market pricing evidence.",
+        "Official provider and payment pricing for the relevant region and usage, plus measured receipts when available."
+      ],
+      "weak_signals": "A subscription price minus model costs alone does not establish profitability. Unknown support or acquisition costs cannot become zero.",
+      "completion": "Calculate reproducible low/base/high scenarios and sensitivity with explicit units; block a profitability conclusion when required inputs remain unavailable."
+    }
+  },
+  "B4": {
+    "id": "B4",
+    "stage": "business",
+    "question": "How could we acquire our first customers?",
+    "required_fields": [
+      "initial_cohort",
+      "channel",
+      "offer",
+      "effort_and_cost",
+      "observable_result"
+    ],
+    "completion_rule": "Propose a reachable acquisition experiment; conversion and acquisition costs remain unverified until measured.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Propose a reachable first-customer acquisition experiment.",
+      "evidence_needed": "Reviewed customer segment and buying path, an accessible channel, a concrete offer and bounded effort or cost assumptions.",
+      "search_routes": [
+        "Reuse Market channel findings and inspect relevant public channel access or pricing terms.",
+        "Find comparable acquisition accounts only to inform assumptions, preserving their population and conditions."
+      ],
+      "weak_signals": "A large community or another company's conversion rate does not establish our acquisition cost.",
+      "completion": "Propose a cohort, channel, offer and observable result; keep conversion assumptions provisional and do not contact anyone."
+    }
+  },
+  "B5": {
+    "id": "B5",
+    "stage": "business",
+    "question": "Why would customers keep using and paying for it?",
+    "required_fields": [
+      "recurring_value",
+      "use_frequency",
+      "reasons_to_leave",
+      "retention_measure"
+    ],
+    "completion_rule": "Explain repeat value and an observation period; a signup is not a retained buyer.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Explain why customers might return and keep paying.",
+      "evidence_needed": "Recurring task frequency, repeated customer value, reasons to leave and any observed retention with its period and cohort.",
+      "search_routes": [
+        "Reuse customer task and switching evidence, then inspect longitudinal usage or cancellation accounts if available.",
+        "Look for contrary evidence such as one-off needs, seasonal usage or workarounds that remove repeat value."
+      ],
+      "weak_signals": "Signups, satisfaction statements and initial purchases do not establish retained paying customers.",
+      "completion": "State a retention hypothesis and an observation period, separating measured retention from reasons the offering might be used again."
+    }
+  },
+  "B6": {
+    "id": "B6",
+    "stage": "business",
+    "question": "Can we build and operate the offering with our resources?",
+    "required_fields": [
+      "minimum_scope",
+      "skills",
+      "dependencies",
+      "time_and_funding",
+      "operating_work"
+    ],
+    "completion_rule": "Match sourced or estimated delivery needs to founder constraints and relevant Technical findings, retaining uncertainty.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Assess whether the founder can build and operate the proposed scope.",
+      "evidence_needed": "Reviewed Technical requirements, minimum capabilities, skills, dependencies, ongoing work, time and funding constraints.",
+      "search_routes": [
+        "Reuse the Technical result and founder constraints before seeking new implementation references.",
+        "Official dependency, deployment and operating documentation for specific unresolved requirements."
+      ],
+      "weak_signals": "A quick prototype or framework example does not establish delivery time, operational reliability or total effort.",
+      "completion": "Match a bounded delivery proposal to resources and dependencies; label time and effort estimates and preserve unavailable Technical inputs."
+    }
+  },
+  "B7": {
+    "id": "B7",
+    "stage": "business",
+    "question": "Why could we win, and what would competitors find difficult to copy?",
+    "required_fields": [
+      "technical_advantage",
+      "business_advantage",
+      "copyability",
+      "counterevidence"
+    ],
+    "completion_rule": "Keep technical and business evidence separate; no unsupported scores, unmeasured performance wins or invented commercial superiority.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Explain a plausible technical or business advantage and how easily it could be copied.",
+      "evidence_needed": "Reviewed Technical comparisons and Market evidence for the same customer task, plus counterevidence and explicit comparison conditions.",
+      "search_routes": [
+        "Reuse source-backed Technical findings for architecture and Market findings for customer or distribution advantages.",
+        "Seek comparable measurements only when needed for a specific performance claim and allowed by scope."
+      ],
+      "weak_signals": "Code inspection cannot establish measured speed, cost or commercial superiority. Feature differences alone do not establish a durable advantage.",
+      "completion": "Separate supported differences from advantage hypotheses and unknown comparisons; do not produce unsupported rankings or scores."
+    }
+  },
+  "B8": {
+    "id": "B8",
+    "stage": "business",
+    "question": "What could make the opportunity unsuitable?",
+    "required_fields": [
+      "material_constraints",
+      "affected_decisions",
+      "required_inputs"
+    ],
+    "completion_rule": "Explain decision-relevant constraints and unmet hard requirements; do not average a blocking condition into a score.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Identify constraints that could make the opportunity unsuitable.",
+      "evidence_needed": "Applicable requirements and explicit founder constraints tied to a concrete product decision, including unresolved mandatory inputs.",
+      "search_routes": [
+        "Reuse recorded constraints and inspect authoritative terms, regulations or requirements only where relevant to the offering.",
+        "Identify what information or expert input is needed to resolve a material constraint."
+      ],
+      "weak_signals": "Generic risk lists and speculative concerns do not establish a blocker; a material hard constraint cannot be averaged into a score.",
+      "completion": "Explain the affected decision and evidence or input needed, distinguishing an established constraint from an unresolved risk."
+    }
+  },
+  "B9": {
+    "id": "B9",
+    "stage": "business",
+    "question": "What should we test next, and what result changes our decision?",
+    "required_fields": [
+      "recommendation",
+      "critical_assumption",
+      "method",
+      "success_rule",
+      "failure_rule",
+      "inconclusive_rule",
+      "proposed_limits"
+    ],
+    "completion_rule": "Propose a bounded validation step and decision conditions; retain human review and do not execute the experiment.",
+    "allow_unavailable": false,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "opportunity-research-v1",
+    "research_guide": {
+      "decision": "Choose the next bounded test that could change the human's decision.",
+      "evidence_needed": "Reviewed findings, required unresolved questions, the most important assumption and the founder's resource limits.",
+      "search_routes": [
+        "Reuse the saved findings and identify the uncertainty that matters most to the next decision.",
+        "Seek only a specific missing fact needed to define a feasible test; unresolved customer evidence may require a proposed interview or purchasing experiment."
+      ],
+      "weak_signals": "More sources or higher agent confidence do not define an experiment's success. A recommendation is not permission to execute it.",
+      "completion": "Propose a method with observable success, failure and inconclusive conditions and finite time/spend; preserve human review and do not execute the test."
+    }
+  }
+}
