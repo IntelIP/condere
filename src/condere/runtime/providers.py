@@ -236,7 +236,7 @@ def accounted_model(
         base_url="https://openrouter.ai/api/v1",
         max_tokens=MODEL_OUTPUT_TOKENS,
         max_retries=0,
-        timeout=90,
+        timeout=300,
         disable_streaming=True,
         stream_usage=False,
         use_responses_api=False,

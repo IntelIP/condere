@@ -9,8 +9,10 @@ import uuid
 from pathlib import Path
 
 import pytest
+from deepagents import graph
+from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import Field
 
 from condere.runtime.agent import build_agent
@@ -202,6 +204,42 @@ async def test_deep_agent_uses_real_sandbox_and_discovers_all_skills(sandboxes):
         "dossier-and-handoff",
     ):
         assert skill in prompt
+
+
+@pytest.mark.asyncio
+async def test_compaction_preserves_evicted_messages_in_native_workspace(sandboxes, monkeypatch):
+    summarizer = RehearsalModel(responses=[AIMessage(content="Saved earlier fixture context.")])
+    monkeypatch.setattr(
+        graph,
+        "create_summarization_middleware",
+        lambda model, backend: SummarizationMiddleware(
+            model=summarizer, backend=backend, trigger=("messages", 4), keep=("messages", 2)
+        ),
+    )
+    model = RehearsalModel(responses=[AIMessage(content="Fixture completed after compaction.")])
+    agent = build_agent(model, sandboxes[0], assignment="Preserve this fictional conversation.")
+    marker = "evicted-fixture-" + uuid.uuid4().hex
+    messages = [HumanMessage(content=marker), AIMessage(content="Acknowledged fixture.")]
+    for index in range(3):
+        messages.extend(
+            [HumanMessage(content=f"Fixture context {index}"), AIMessage(content="Recorded.")]
+        )
+    messages.append(HumanMessage(content="Finish this fixture."))
+    result = await agent.ainvoke({"messages": messages})
+    assert result["messages"][-1].content == "Fixture completed after compaction."
+    command = (
+        "import json,pathlib; "
+        "print(json.dumps([str(p) for p in "
+        "pathlib.Path('/workspace/conversation_history').glob('*.md')]))"
+    )
+    listing = sandboxes[0].execute("python -c " + shlex.quote(command))
+    assert listing.exit_code == 0
+    paths = json.loads(listing.output)
+    assert paths, "Compaction must save evicted messages inside the writable sandbox workspace."
+    files = sandboxes[0].download_files(paths)
+    assert all(file.error is None for file in files)
+    assert any(marker.encode() in file.content for file in files)
+    assert "execute" in model.tool_names and "task" not in model.tool_names
 
 
 @pytest.mark.skipif(

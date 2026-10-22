@@ -5,6 +5,7 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents._models import get_model_identifier, get_model_provider
+from deepagents.backends import CompositeBackend
 from deepagents.profiles import (
     GeneralPurposeSubagentProfile,
     HarnessProfile,
@@ -71,7 +72,7 @@ def build_agent(
         model=model,
         tools=list(tools),
         system_prompt=instructions,
-        backend=sandbox,
+        backend=CompositeBackend(default=sandbox, routes={}, artifacts_root="/workspace"),
         skills=["/workspace/skills/"],
         subagents=[],
         checkpointer=checkpointer,
