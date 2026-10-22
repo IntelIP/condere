@@ -1,0 +1,7 @@
+# Offline smoke environment; the full research image is an MDA-02 deliverable.
+# Replace this development image tag with the tested image digest before release.
+image = "python:3.12-alpine"
+cmd = ["python", "-c", "print('condere-smolvm-ready')"]
+cpus = 2
+memory = 2048
+net = false
