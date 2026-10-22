@@ -15,7 +15,14 @@ from botocore.exceptions import ClientError
 from pydantic import AwareDatetime, Field
 
 from condere.runtime.calculations import Record, Text
-from condere.runtime.contracts import AssessmentFindings, Citation, Finding, Metric
+from condere.runtime.contracts import (
+    AssessmentFindings,
+    Citation,
+    Finding,
+    Metric,
+    QuestionAnswer,
+    TechnicalReport,
+)
 from condere.runtime.state import AssessmentStore, NotFound, content_hash
 
 MAX_OBJECT_BYTES = 80 * 1024 * 1024
@@ -219,7 +226,12 @@ class EvidenceStore:
         ):
             raise EvidenceError("A cited passage does not match its saved source.")
 
-    def verify_findings(self, owner: str, assessment_id: str, findings: AssessmentFindings) -> None:
+    def verify_findings(
+        self,
+        owner: str,
+        assessment_id: str,
+        findings: AssessmentFindings | TechnicalReport | QuestionAnswer,
+    ) -> None:
         """Check all references; semantic support remains the final reviewer's responsibility."""
         receipts = {
             record["record_key"]: record["payload"]
@@ -237,12 +249,20 @@ class EvidenceStore:
                 and receipt.get("original_sha256") == source.original_sha256
             )
 
-        statements: list[Finding | Metric] = [
-            *findings.technical.findings.values(),
-            *(item.finding for item in findings.technical.capabilities),
-            *findings.technical.metrics,
-            *findings.questions,
-        ]
+        technical = (
+            findings.technical
+            if isinstance(findings, AssessmentFindings)
+            else (findings if isinstance(findings, TechnicalReport) else None)
+        )
+        statements: list[Finding | Metric] = (
+            list(findings.questions)
+            if isinstance(findings, AssessmentFindings)
+            else ([findings] if isinstance(findings, QuestionAnswer) else [])
+        )
+        if technical is not None:
+            statements.extend(technical.findings.values())
+            statements.extend(item.finding for item in technical.capabilities)
+            statements.extend(technical.metrics)
         for source_id in {
             source_id for statement in statements for source_id in statement.source_ids
         }:
@@ -273,7 +293,7 @@ class EvidenceStore:
                         measured_source(source_id) for source_id in item.source_ids
                     ):
                         raise EvidenceError("Measured calculation inputs need protected receipts.")
-        for metric in findings.technical.metrics:
+        for metric in technical.metrics if technical is not None else []:
             if metric.basis == "measured":
                 expected = metric.model_dump(
                     mode="json",
@@ -297,7 +317,7 @@ class EvidenceStore:
             record["record_key"]: record["payload"]
             for record in self.state.records(owner, assessment_id, kind="repository_inspection")
         }
-        for inspection in findings.technical.repositories:
+        for inspection in technical.repositories if technical is not None else []:
             source = self.source(owner, assessment_id, inspection.archive_source_id)
             if (
                 source.kind != "repository"

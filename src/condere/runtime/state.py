@@ -270,7 +270,7 @@ class AssessmentStore:
     def _stop(connection, assessment_id: str, status: str) -> None:
         connection.execute(
             """UPDATE assessments
-               SET status=CASE WHEN status='cancelled' THEN 'cancelled' ELSE %s END,
+               SET status=CASE WHEN status IN ('cancelled','completed') THEN status ELSE %s END,
                updated_at=now() WHERE id=%s""",
             (status, assessment_id),
         )
@@ -498,13 +498,37 @@ class AssessmentStore:
         payload: dict,
         *,
         supersedes_hash: str | None = None,
+        generation: int | None = None,
+        worker_id: str | None = None,
     ) -> dict:
         """Keep originals immutable; a revision explicitly names the prior accepted version."""
         if not kind or not key:
             raise ValueError("Record kind and key are required.")
         digest = content_hash(payload)
         with self.connection() as connection:
-            self._lock(connection, owner, assessment_id)
+            assessment = self._lock(connection, owner, assessment_id)
+            if generation is not None:
+                self._active(assessment, generation)
+                worker = connection.execute(
+                    "SELECT * FROM workers WHERE id=%s AND assessment_id=%s AND generation=%s",
+                    (worker_id, assessment_id, generation),
+                ).fetchone()
+                if worker is None or worker["status"] != "running":
+                    raise Conflict("A running assigned worker is required for this submission.")
+                assignment = worker["assignment"]
+                allowed = (
+                    (assignment["role"] == "technical" and (kind, key) == ("technical", "main"))
+                    or (
+                        assignment["role"] in {"market", "business"}
+                        and kind == "question"
+                        and key in assignment["question_ids"]
+                    )
+                    or (assignment["role"] == "review" and (kind, key) == ("review", "final"))
+                )
+                if not allowed:
+                    raise Conflict("The submission is outside this worker's assignment.")
+            elif worker_id is not None:
+                raise Conflict("A worker submission needs its admitted generation.")
             old = connection.execute(
                 """SELECT * FROM records WHERE assessment_id=%s AND kind=%s AND record_key=%s
                    ORDER BY version DESC""",
@@ -513,7 +537,12 @@ class AssessmentStore:
             for record in old:
                 if record["content_hash"] == digest:
                     return record
-            if old and kind in {"source", "measurement_receipt", "repository_inspection"}:
+            if old and kind in {
+                "source",
+                "measurement_receipt",
+                "repository_inspection",
+                "dossier",
+            }:
                 raise Conflict("Source originals and execution receipts cannot be revised.")
             if supersedes_hash != (old[0]["content_hash"] if old else None):
                 raise Conflict(
@@ -589,6 +618,101 @@ class AssessmentStore:
                 "UPDATE workers SET machine_id=%s,status='running' WHERE id=%s RETURNING *",
                 (machine_id, worker_id),
             ).fetchone()
+
+    def spending(self, owner: str, assessment_id: str) -> dict:
+        with self.connection() as connection:
+            assessment = self._lock(connection, owner, assessment_id)
+            return {
+                "budget": self._budget(connection, assessment["campaign_id"]),
+                "operations": connection.execute(
+                    """SELECT id,operation_key,kind,state,reserved_microusd,actual_microusd,
+                       cost_basis,dispatch_identity FROM operations WHERE assessment_id=%s
+                       ORDER BY created_at,id""",
+                    (assessment_id,),
+                ).fetchall(),
+            }
+
+    def finish_worker(
+        self,
+        owner: str,
+        assessment_id: str,
+        generation: int,
+        worker_id: str,
+        completion: dict,
+    ) -> dict:
+        with self.connection() as connection:
+            self._active(self._lock(connection, owner, assessment_id), generation)
+            worker = connection.execute(
+                """SELECT * FROM workers WHERE id=%s AND assessment_id=%s
+                   AND generation=%s FOR UPDATE""",
+                (worker_id, assessment_id, generation),
+            ).fetchone()
+            if worker is None:
+                raise NotFound("Worker not found.")
+            if worker["status"] == "completed" and worker["completion"] == completion:
+                return worker
+            if worker["status"] != "running":
+                raise Conflict("Only a running assigned worker can finish.")
+            if not completion.get("accepted_hashes"):
+                raise Conflict("Worker completion must identify its accepted outputs.")
+            for identity, digest in completion["accepted_hashes"].items():
+                kind, key = identity.split(":", 1)
+                current = connection.execute(
+                    """SELECT content_hash FROM records WHERE assessment_id=%s AND kind=%s
+                       AND record_key=%s ORDER BY version DESC LIMIT 1""",
+                    (assessment_id, kind, key),
+                ).fetchone()
+                if current is None or current["content_hash"] != digest:
+                    raise Conflict("Worker outputs changed before completion was recorded.")
+            return connection.execute(
+                "UPDATE workers SET status='completed',completion=%s WHERE id=%s RETURNING *",
+                (Jsonb(completion), worker_id),
+            ).fetchone()
+
+    def publish_dossier(
+        self,
+        owner: str,
+        assessment_id: str,
+        generation: int,
+        payload: dict,
+        expected: dict[str, str],
+    ) -> dict:
+        """Atomically freeze the reviewed versions and complete this assessment."""
+        with self.connection() as connection:
+            self._active(self._lock(connection, owner, assessment_id), generation)
+            if connection.execute(
+                "SELECT 1 FROM operations WHERE assessment_id=%s "
+                "AND state IN ('reserved','dispatched','uncertain') LIMIT 1",
+                (assessment_id,),
+            ).fetchone():
+                raise RecoveryRequired("Resolve pending operations before delivering the dossier.")
+            if connection.execute(
+                "SELECT 1 FROM workers WHERE assessment_id=%s "
+                "AND status IN ('assigned','running') LIMIT 1",
+                (assessment_id,),
+            ).fetchone():
+                raise Conflict("Workers must finish before the dossier is delivered.")
+            heads = connection.execute(
+                """SELECT DISTINCT ON (kind,record_key) kind,record_key,content_hash
+                   FROM records WHERE assessment_id=%s AND kind IN ('technical','question','review')
+                   ORDER BY kind,record_key,version DESC""",
+                (assessment_id,),
+            ).fetchall()
+            actual = {row["kind"] + ":" + row["record_key"]: row["content_hash"] for row in heads}
+            if actual != expected:
+                raise Conflict(
+                    "Accepted findings changed after review; the dossier was not published."
+                )
+            saved = connection.execute(
+                """INSERT INTO records (assessment_id,kind,record_key,version,content_hash,payload)
+                   VALUES (%s,'dossier','final',1,%s,%s) RETURNING *""",
+                (assessment_id, content_hash(payload), Jsonb(payload)),
+            ).fetchone()
+            connection.execute(
+                "UPDATE assessments SET status='completed',updated_at=now() WHERE id=%s",
+                (assessment_id,),
+            )
+            return saved
 
     def workers(self, owner: str, assessment_id: str) -> list[dict]:
         with self.connection() as connection:
