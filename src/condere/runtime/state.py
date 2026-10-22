@@ -513,6 +513,8 @@ class AssessmentStore:
             for record in old:
                 if record["content_hash"] == digest:
                     return record
+            if old and kind in {"source", "measurement_receipt", "repository_inspection"}:
+                raise Conflict("Source originals and execution receipts cannot be revised.")
             if supersedes_hash != (old[0]["content_hash"] if old else None):
                 raise Conflict(
                     "Revision must name the latest accepted original; originals remain retrievable."
