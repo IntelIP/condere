@@ -481,6 +481,42 @@ class AssessmentStore:
                 self._stop(connection, assessment_id, "interrupted")
             return saved
 
+    def record_pending_cost(
+        self,
+        owner: str,
+        assessment_id: str,
+        operation_id: str,
+        upper_microusd: int,
+        basis: dict,
+    ) -> dict:
+        """Retain estimates as pending liabilities, including an unexpected higher bound."""
+        money(upper_microusd)
+        if not basis:
+            raise ValueError("A pending-cost bound needs its evidence basis.")
+        with self.connection() as connection:
+            assessment = self._lock(connection, owner, assessment_id)
+            operation = self._operation(connection, assessment_id, operation_id)
+            if operation["state"] not in {"succeeded", "failed", "uncertain"}:
+                raise Conflict(
+                    "Record a pending bill only after a dispatched outcome or interruption."
+                )
+            if operation["actual_microusd"] is not None:
+                raise Conflict("An estimate cannot replace a settled charge.")
+            reconciliation = dict(operation["reconciliation"] or {})
+            reconciliation["pending_cost_basis"] = basis
+            bound = max(operation["reserved_microusd"], upper_microusd)
+            saved = connection.execute(
+                """UPDATE operations SET reserved_microusd=%s,reconciliation=%s,updated_at=now()
+                   WHERE id=%s RETURNING *""",
+                (bound, Jsonb(reconciliation), operation_id),
+            ).fetchone()
+            if (
+                bound > operation["reserved_microusd"]
+                or self._budget(connection, assessment["campaign_id"])["available_microusd"] < 0
+            ):
+                self._stop(connection, assessment_id, "interrupted")
+            return saved
+
     def operations(self, owner: str, assessment_id: str) -> list[dict]:
         with self.connection() as connection:
             self._assessment(connection, owner, assessment_id)
@@ -626,7 +662,8 @@ class AssessmentStore:
                 "budget": self._budget(connection, assessment["campaign_id"]),
                 "operations": connection.execute(
                     """SELECT id,operation_key,kind,state,reserved_microusd,actual_microusd,
-                       cost_basis,dispatch_identity FROM operations WHERE assessment_id=%s
+                       cost_basis,dispatch_identity,reconciliation FROM operations
+                       WHERE assessment_id=%s
                        ORDER BY created_at,id""",
                     (assessment_id,),
                 ).fetchall(),
