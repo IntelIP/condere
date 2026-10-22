@@ -94,6 +94,7 @@ def build_app():
             base_url=values["LANGFUSE_BASE_URL"],
             environment="development",
             release=service.method_version,
+            timeout=2,
         )
         coordinator = AssessmentCoordinator(
             service,
@@ -104,6 +105,7 @@ def build_app():
             openrouter_key=values["CONDERE_OPENROUTER_API_KEY"],
             exa_key=values["EXA_API_KEY"],
             callbacks=[CallbackHandler(public_key=values["LANGFUSE_PUBLIC_KEY"])],
+            telemetry=telemetry,
         )
         app = create_app(
             service,

@@ -163,6 +163,9 @@ def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[st
             "execution_errors": await asyncio.to_thread(
                 service.state.records, owner, assessment_id, kind="execution_error"
             ),
+            "telemetry": await asyncio.to_thread(
+                service.state.records, owner, assessment_id, kind="telemetry"
+            ),
         }
 
     @app.post(PREFIX + "/{assessment_id}/cancel")

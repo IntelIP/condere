@@ -94,6 +94,7 @@ async def run_worker(
             "configurable": {"thread_id": assigned["thread_id"]},
             "metadata": {
                 "assessment_id": assessment_id,
+                "execution_mode": service.execution_mode,
                 "worker_id": assigned["id"],
                 "generation": generation,
                 "role": role,

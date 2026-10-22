@@ -45,7 +45,7 @@ def main() -> None:
         while time.monotonic() < deadline:
             try:
                 observations = client.api.observations.get_many(
-                    trace_id=trace_id, fields="core", limit=10
+                    trace_id=trace_id, fields="core,basic,metadata", limit=10
                 )
                 matching = [
                     item

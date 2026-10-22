@@ -1,11 +1,15 @@
 """One bounded assessment: Technical/Market work, Business synthesis, and final review."""
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
+from uuid import uuid4
 
+from langfuse import Langfuse
 from smol import ConnectOptions, Machine
 
 from condere.runtime.checkpoints import checkpoint_store
@@ -38,6 +42,7 @@ class AssessmentCoordinator:
         exa_key: str | None = None,
         model_factory=None,
         callbacks: list | None = None,
+        telemetry: Langfuse | None = None,
     ):
         if service.execution_mode == "live" and (
             not openrouter_key or not exa_key or model_factory
@@ -53,6 +58,7 @@ class AssessmentCoordinator:
         self.artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._router_key, self._exa_key = openrouter_key, exa_key
         self._model_factory, self.callbacks = model_factory, callbacks or []
+        self.telemetry = telemetry
         self._tasks: dict[tuple[str, str], asyncio.Task] = {}
 
     @staticmethod
@@ -162,6 +168,68 @@ class AssessmentCoordinator:
         return await asyncio.to_thread(self.state.get, owner, assessment_id)
 
     async def run(
+        self,
+        owner: str,
+        assessment_id: str,
+        **options,
+    ):
+        current = await asyncio.to_thread(self.state.get, owner, assessment_id)
+        if self.telemetry is None or current["status"] == "completed":
+            return await self._run(owner, assessment_id, **options)
+        span_context = contextlib.ExitStack()
+        trace_id = None
+        try:
+            span_context.enter_context(
+                self.telemetry.start_as_current_observation(
+                    name="condere.assessment",
+                    metadata={
+                        "assessment_id": assessment_id,
+                        "execution_mode": self.service.execution_mode,
+                    },
+                )
+            )
+            trace_id = self.telemetry.get_current_trace_id()
+        except Exception:
+            logging.getLogger(__name__).warning("Assessment telemetry could not start.")
+        try:
+            return await self._run(owner, assessment_id, **options)
+        finally:
+            try:
+                span_context.close()
+                await asyncio.to_thread(self._record_telemetry, owner, assessment_id, trace_id)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Assessment telemetry status could not be saved."
+                )
+
+    def _record_telemetry(self, owner: str, assessment_id: str, trace_id: str | None):
+        status, error_type = "unavailable", None
+        try:
+            if trace_id:
+                self.telemetry.flush()
+                observations = self.telemetry.api.observations.get_many(
+                    trace_id=trace_id,
+                    fields="core",
+                    limit=1,
+                    request_options={"timeout_in_seconds": 2, "max_retries": 0},
+                )
+                status = "observed" if observations.data else "pending"
+        except Exception as error:
+            error_type = type(error).__name__
+        self.state.append_record(
+            owner,
+            assessment_id,
+            "telemetry",
+            trace_id or str(uuid4()),
+            {
+                "trace_id": trace_id,
+                "status": status,
+                "error_type": error_type,
+                "execution_mode": self.service.execution_mode,
+            },
+        )
+
+    async def _run(
         self,
         owner: str,
         assessment_id: str,

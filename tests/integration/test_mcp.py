@@ -170,9 +170,23 @@ async def test_stdio_retrieves_same_saved_result_and_explicit_writes(setup_case,
     os.environ.get("CONDERE_TEST_SANDBOX") != "1" or os.environ.get("CONDERE_TEST_OBJECTS") != "1",
     reason="This complete protocol check requires native VMs and native object storage",
 )
-async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tmp_path):
+async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tmp_path, request):
     service, owner, case, make, _, calls, created, _ = native_case
-    coordinator = make()
+    telemetry = None
+    callbacks = []
+    trace_ids = []
+    outage = os.environ.get("CONDERE_TEST_LANGFUSE_OUTAGE") == "1"
+    if os.environ.get("CONDERE_TEST_LANGFUSE") == "1":
+        from langfuse import Langfuse
+        from langfuse.langchain import CallbackHandler
+
+        telemetry = Langfuse(environment="integration", release=service.method_version, timeout=2)
+        request.addfinalizer(telemetry.shutdown)
+        if not outage:
+            assert telemetry.auth_check()
+        callbacks = [CallbackHandler(public_key=os.environ["LANGFUSE_PUBLIC_KEY"])]
+    assert not outage or telemetry is not None
+    coordinator = make(callbacks=callbacks, telemetry=telemetry)
     completed = asyncio.Event()
     run = coordinator.run
 
@@ -211,11 +225,45 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
             assert body in [package.read(name) for name in package.namelist()]
         assert len(calls) == 4 and len(created) == 4
         assert service.state.operations(owner, case["id"]) == []
+        if telemetry is not None:
+            status = await call(session, "assessment_status", identity)
+            telemetry_record = status["telemetry"][0]["payload"]
+            trace_ids.append(telemetry_record["trace_id"])
+            assert telemetry_record["execution_mode"] == "simulation"
+            if outage:
+                assert telemetry_record["status"] == "unavailable"
+                assert telemetry_record["error_type"]
+            else:
+                assert telemetry_record["status"] in {"observed", "pending"}
+        if telemetry is not None and not outage:
+            await asyncio.to_thread(telemetry.flush)
+            deadline = asyncio.get_running_loop().time() + 30
+            roles = set()
+            while asyncio.get_running_loop().time() < deadline:
+                observations = await asyncio.to_thread(
+                    telemetry.api.observations.get_many,
+                    trace_id=trace_ids[0],
+                    fields="core,basic,metadata",
+                    limit=1000,
+                )
+                roles = {
+                    item.metadata.get("role")
+                    for item in observations.data
+                    if item.metadata
+                    and item.metadata.get("assessment_id") == case["id"]
+                    and item.metadata.get("execution_mode") == "simulation"
+                    and item.metadata.get("worker_id")
+                }
+                if roles == {"technical", "market", "business", "review"}:
+                    break
+                await asyncio.sleep(0.5)
+            assert roles == {"technical", "market", "business", "review"}
         from smol import ConnectOptions, Machine
 
         remaining = {machine.id for machine in Machine.list(ConnectOptions(target="local"))}
         assert not {sandbox.id for sandbox in created} & remaining
-        receipt = Path(__file__).resolve().parents[2] / ".artifacts/infrastructure/native-mcp.json"
+        receipt_name = "native-mcp-telemetry-outage.json" if outage else "native-mcp.json"
+        receipt = Path(__file__).resolve().parents[2] / ".artifacts/infrastructure" / receipt_name
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text(
             json.dumps(
@@ -231,6 +279,8 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
                     "storage": "native MinIO",
                     "transport": "stdio and HTTP",
                     "provider_operations": 0,
+                    "langfuse_trace_ids": trace_ids,
+                    "telemetry_outage": outage,
                 },
                 indent=2,
             )

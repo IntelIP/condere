@@ -45,16 +45,42 @@ class BlockingModel(RehearsalModel):
 
 @pytest.fixture
 def native_case(tmp_path, monkeypatch):
-    for key in ("OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "OPENAI_API_KEY", "EXA_API_KEY"):
+    for key in (
+        "OPENROUTER_API_KEY",
+        "CONDERE_OPENROUTER_API_KEY",
+        "OPENROUTER_MANAGEMENT_KEY",
+        "OPENAI_API_KEY",
+        "EXA_API_KEY",
+    ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
 
-    def no_http(*args, **kwargs):
+    local_tracing = os.environ.get("CONDERE_TEST_LANGFUSE") == "1"
+    if local_tracing and os.environ.get("LANGFUSE_BASE_URL") != "http://127.0.0.1:3000":
+        pytest.fail("Native tracing checks require the task's local Langfuse service.")
+    sync_request = httpx.HTTPTransport.handle_request
+    async_request = httpx.AsyncHTTPTransport.handle_async_request
+
+    def is_local_trace(request):
+        return local_tracing and (request.url.scheme, request.url.host, request.url.port) == (
+            "http",
+            "127.0.0.1",
+            3000,
+        )
+
+    def no_http(transport, request):
+        if is_local_trace(request):
+            return sync_request(transport, request)
+        pytest.fail("Coordinator fixtures must not use real provider HTTP.")
+
+    async def no_async_http(transport, request):
+        if is_local_trace(request):
+            return await async_request(transport, request)
         pytest.fail("Coordinator fixtures must not use real provider HTTP.")
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", no_http)
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", no_http)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", no_async_http)
     state = AssessmentStore(os.environ["CONDERE_DATABASE_URL"])
     state.setup()
     native_objects = os.environ.get("CONDERE_TEST_OBJECTS") == "1"
@@ -151,7 +177,7 @@ def native_case(tmp_path, monkeypatch):
             ]
         )
 
-    def coordinator(model_factory=None):
+    def coordinator(model_factory=None, callbacks=None, telemetry=None):
         return AssessmentCoordinator(
             service,
             checkpoint_dsn=os.environ["CONDERE_CHECKPOINT_URL"],
@@ -159,6 +185,8 @@ def native_case(tmp_path, monkeypatch):
             image=os.environ["CONDERE_SMOL_IMAGE"],
             artifacts=tmp_path,
             model_factory=model_factory or factory,
+            callbacks=callbacks,
+            telemetry=telemetry,
         )
 
     if native_objects:
