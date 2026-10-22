@@ -175,6 +175,7 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
     telemetry = None
     callbacks = []
     trace_ids = []
+    failure_lineage = []
     outage = os.environ.get("CONDERE_TEST_LANGFUSE_OUTAGE") == "1"
     if os.environ.get("CONDERE_TEST_LANGFUSE") == "1":
         from langfuse import Langfuse
@@ -254,10 +255,36 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
                     and item.metadata.get("execution_mode") == "simulation"
                     and item.metadata.get("worker_id")
                 }
-                if roles == {"technical", "market", "business", "review"}:
+                by_id = {item.id: item for item in observations.data}
+                failure = next(
+                    (
+                        item
+                        for item in observations.data
+                        if item.name == "submit_technical" and item.level == "ERROR"
+                    ),
+                    None,
+                )
+                failure_lineage = []
+                ancestor = failure
+                while ancestor is not None:
+                    assert ancestor.id not in {item.id for item in failure_lineage}
+                    failure_lineage.append(ancestor)
+                    if ancestor.name == "condere.assessment":
+                        break
+                    ancestor = by_id.get(ancestor.parent_observation_id)
+                if (
+                    roles == {"technical", "market", "business", "review"}
+                    and failure_lineage
+                    and failure_lineage[-1].name == "condere.assessment"
+                ):
                     break
                 await asyncio.sleep(0.5)
             assert roles == {"technical", "market", "business", "review"}
+            assert failure is not None and "capabilities" in failure.status_message
+            assert failure.metadata["assessment_id"] == case["id"]
+            assert failure.metadata["role"] == "technical"
+            assert any(item.name == "condere-worker" for item in failure_lineage)
+            assert failure_lineage[-1].name == "condere.assessment"
         from smol import ConnectOptions, Machine
 
         remaining = {machine.id for machine in Machine.list(ConnectOptions(target="local"))}
@@ -280,6 +307,7 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
                     "transport": "stdio and HTTP",
                     "provider_operations": 0,
                     "langfuse_trace_ids": trace_ids,
+                    "recovered_tool_failure_lineage": [item.id for item in failure_lineage],
                     "telemetry_outage": outage,
                 },
                 indent=2,

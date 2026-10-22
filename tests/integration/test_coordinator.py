@@ -172,6 +172,22 @@ def native_case(tmp_path, monkeypatch):
                 AIMessage(
                     content="", tool_calls=[{"name": "read_assessment", "args": {}, "id": "read"}]
                 ),
+                *(
+                    [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "submit_technical",
+                                    "args": {"payload": {}},
+                                    "id": "deliberately-invalid-technical",
+                                }
+                            ],
+                        )
+                    ]
+                    if role == "technical"
+                    else []
+                ),
                 AIMessage(content="", tool_calls=submissions),
                 AIMessage(content="All assigned fictional records were submitted."),
             ]
