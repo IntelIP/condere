@@ -272,6 +272,21 @@ class AssessmentStore:
             result["budget"] = self._budget(connection, result["campaign_id"])
             return result
 
+    def list_assessments(self, owner: str, offset: int = 0, limit: int = 30) -> dict:
+        if offset < 0 or not 1 <= limit <= 50:
+            raise ValueError("Request a nonnegative offset and 1-50 assessments.")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """SELECT id,status,generation,brief->>'technology' AS technology,
+                   brief->>'idea' AS idea,created_at,updated_at FROM assessments WHERE owner_id=%s
+                   ORDER BY created_at DESC,id LIMIT %s OFFSET %s""",
+                (owner, limit + 1, offset),
+            ).fetchall()
+            return {
+                "assessments": rows[:limit],
+                "next_offset": offset + limit if len(rows) > limit else None,
+            }
+
     def begin(self, owner: str, assessment_id: str, *, resume: bool = False) -> dict:
         with self.connection() as connection:
             assessment = self._lock(connection, owner, assessment_id)
