@@ -18,6 +18,7 @@ def doppler(*args: str, payload: str | None = None) -> str:
         capture_output=True,
         text=True,
         check=False,
+        cwd=Path(__file__).resolve().parents[1],
     )
     if result.returncode:
         raise SystemExit(f"Doppler {args[0]} failed; no secret output was displayed.")

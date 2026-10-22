@@ -26,11 +26,18 @@ real VM; all 17 question-specific guides are preserved. Public repository
 acquisition records an exact commit and verifies the same source inside the VM.
 These checks demonstrate infrastructure behavior, not a real assessment.
 
-Langfuse configuration and image pins are prepared, but its launch is blocked by
-the current Docker disk limit. Assessment persistence, spending controls, research
-tools, final review/report delivery, API/MCP, and actual client use remain
-unfinished. No paid assessment has run. See the [handoff](roadmap.md#current-handoff)
-for the active goal and next actions.
+Assessment persistence, bounded provider accounting, the four research/review
+workers, reports and portable exports, and the authenticated API/MCP adapters are
+implemented. A complete fictional dossier has passed through the native worker
+pipeline and API; a separate real MCP/HTTP connection retrieved saved findings
+without starting research. These checks use deterministic models and simulated
+object storage.
+
+Langfuse launch is blocked by the current Docker disk limit. Actual evidence
+storage, integrated tracing, remaining failure checks, the one live assessment,
+and retrieval inside both coding clients remain unfinished. No paid assessment
+has run. See the [installation guide](infra/README.md#api-and-coding-client-installation)
+and [handoff](roadmap.md#current-handoff) for working commands and prerequisites.
 
 `codex/condere-mda` has independent Git history. The original Agno implementation
 and its uncommitted work remain in their existing branches/worktrees. Port useful
