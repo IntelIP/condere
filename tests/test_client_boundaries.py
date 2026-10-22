@@ -1,14 +1,43 @@
 """Client transport/credential boundaries; no providers or external services."""
 
 import hashlib
+import json
 import runpy
 from pathlib import Path
 
 import httpx
 import pytest
 
+from condere.interfaces import server
 from condere.interfaces.mcp import AssessmentClient, validate_api_url
 from condere.interfaces.server import configuration
+
+
+def test_runtime_accepts_only_pinned_or_verified_local_images(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "REPOSITORY", tmp_path)
+    archive = tmp_path / ".runtime/images/inspection.tar"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"fixture image archive")
+    manifest = tmp_path / "infra/smolvm/inspection-image.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "archive": str(archive.relative_to(tmp_path)),
+                "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            }
+        )
+    )
+    assert server.verified_image(str(archive)) == str(archive)
+    assert server.verified_image(str(archive.relative_to(tmp_path))) == str(archive)
+    immutable = "python@sha256:" + "a" * 64
+    assert server.verified_image(immutable) == immutable
+    for value in ("python:latest", "python@sha256:", str(tmp_path / "other.tar")):
+        with pytest.raises(ValueError, match="verified inspection"):
+            server.verified_image(value)
+    archive.write_bytes(b"changed archive")
+    with pytest.raises(ValueError, match="content hash"):
+        server.verified_image(str(archive))
 
 
 def test_launch_selects_only_component_credentials_and_rejects_unsafe_origins():

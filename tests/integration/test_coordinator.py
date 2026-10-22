@@ -18,7 +18,7 @@ from test_service import question, review
 
 from condere.runtime.contracts import TECHNICAL_FIELDS
 from condere.runtime.coordinator import AssessmentCoordinator
-from condere.runtime.evidence import EvidenceStore
+from condere.runtime.evidence import EvidenceStore, object_client
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import AssessmentStore, Conflict, NotFound, RecoveryRequired
@@ -57,9 +57,14 @@ def native_case(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", no_http)
     state = AssessmentStore(os.environ["CONDERE_DATABASE_URL"])
     state.setup()
+    native_objects = os.environ.get("CONDERE_TEST_OBJECTS") == "1"
+    if native_objects and os.environ.get("CONDERE_EVIDENCE_ENDPOINT") != "http://127.0.0.1:19000":
+        pytest.fail("Native coordinator object checks require the task's local evidence service.")
+    objects = object_client(os.environ) if native_objects else SimulatedObjects()
+    bucket = os.environ["CONDERE_EVIDENCE_BUCKET"] if native_objects else "condere-coordinator-test"
     service = AssessmentService(
         state,
-        EvidenceStore(state, SimulatedObjects(), "condere-coordinator-test"),
+        EvidenceStore(state, objects, bucket),
         execution_mode="simulation",
     )
     owner, campaign = "coordinator-test-" + str(uuid4()), str(uuid4())
@@ -156,11 +161,25 @@ def native_case(tmp_path, monkeypatch):
             model_factory=model_factory or factory,
         )
 
+    if native_objects:
+        service.evidence.save_source(
+            owner,
+            case["id"],
+            kind="web",
+            origin="https://example.com/native-storage-fixture",
+            original=b"Fictional source for the native storage integration check.",
+            text="Fictional source for the native storage integration check.",
+            media_type="text/plain",
+            provenance={"provider": "simulation", "storage": "native"},
+            limitations=["Tests storage behavior; establishes no business finding."],
+        )
     yield service, owner, case, coordinator, factory, calls, created, tmp_path
     existing = {item.id for item in Machine.list(ConnectOptions(target="local"))}
     for sandbox in created:
         if sandbox.id in existing:
             sandbox.close(delete=True)
+    if native_objects:
+        objects.close()
 
 
 @pytest.mark.asyncio

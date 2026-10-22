@@ -27,17 +27,20 @@ acquisition records an exact commit and verifies the same source inside the VM.
 These checks demonstrate infrastructure behavior, not a real assessment.
 
 Assessment persistence, bounded provider accounting, the four research/review
-workers, reports and portable exports, and the authenticated API/MCP adapters are
-implemented. A complete fictional dossier has passed through the native worker
-pipeline and API; a separate real MCP/HTTP connection retrieved saved findings
-without starting research. These checks use deterministic models and simulated
-object storage.
+workers, reports and portable exports, and authenticated API/MCP adapters are
+implemented. A complete fictional dossier now passes through the custom native
+SmolVM image, PostgreSQL, actual local object storage, HTTP, and stdio MCP. The
+sources and report remain retrievable after worker VM deletion; a separate storage
+restart check retained saved source identities and a complete dossier. Research
+models remain deterministic fixtures, so these results establish integration
+behavior rather than business conclusions.
 
-Langfuse launch is blocked by the current Docker disk limit. Actual evidence
-storage, integrated tracing, remaining failure checks, the one live assessment,
-and retrieval inside both coding clients remain unfinished. No paid assessment
-has run. See the [installation guide](infra/README.md#api-and-coding-client-installation)
-and [handoff](roadmap.md#current-handoff) for working commands and prerequisites.
+All six Langfuse services are healthy in a separate task-owned local VM. The
+synthetic trace retrieval check still fails after restart. Integrated tracing,
+remaining failure checks, the one live assessment, and retrieval inside both
+coding clients remain unfinished. No paid assessment has run. See the
+[installation guide](infra/README.md#api-and-coding-client-installation) and
+[handoff](roadmap.md#current-handoff) for working commands and prerequisites.
 
 `codex/condere-mda` has independent Git history. The original Agno implementation
 and its uncommitted work remain in their existing branches/worktrees. Port useful

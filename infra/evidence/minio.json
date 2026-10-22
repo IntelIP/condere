@@ -1,0 +1,12 @@
+{
+  "release_tag": "RELEASE.2025-10-15T17-29-55Z",
+  "source_url": "https://github.com/minio/minio",
+  "source_commit": "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
+  "module_version": "v0.0.0-20251015172955-9e49d5e7a648",
+  "module_sum": "h1:6TdolSCLSs2nwm8i0PpWDqf9iX2Ty9WQK8wmr7dCnUM=",
+  "go_version": "go1.25.6",
+  "platform": "darwin/arm64",
+  "binary_sha256": "0b1b49da4c3cfedc61a381e2129ab8a4df60b3c0aff409b5ba91330d4a59c7b8",
+  "license": "AGPL-3.0",
+  "purpose": "Dedicated local development evidence store; not the hosted GCS deployment"
+}

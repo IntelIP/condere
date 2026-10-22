@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from langfuse import Langfuse
 
@@ -28,7 +29,12 @@ def main() -> None:
             with client.start_as_current_observation(
                 name="condere.infrastructure.synthetic",
                 as_type="span",
-                metadata={"simulated": True, "model_invoked": False, "milestone": "MDA-01"},
+                metadata={
+                    "simulated": True,
+                    "model_invoked": False,
+                    "milestone": "MDA-01",
+                    "assessment_id": str(uuid4()),
+                },
                 input={"purpose": "Verify trace persistence without inference"},
             ) as span:
                 trace_id = client.get_current_trace_id()
@@ -49,6 +55,7 @@ def main() -> None:
                 if not matching:
                     raise RuntimeError("Diagnostic observation is not yet queryable.")
                 record = {
+                    "assessment_id": matching[0].metadata["assessment_id"],
                     "trace_id": trace_id,
                     "observation_id": matching[0].id,
                     "base_url": base_url,

@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from configure_langfuse import doppler
 
+from condere.interfaces.server import verified_image
+
 ORIGIN = "http://127.0.0.1:7778"
 
 
@@ -21,6 +23,9 @@ def main() -> None:
         "CONDERE_EXPORT_DIRECTORY": str(Path.home() / ".local/share/condere-mda/exports"),
         "CONDERE_ARTIFACT_DIRECTORY": str(Path.home() / ".local/share/condere-mda/artifacts"),
     }
+    manifest = Path(__file__).resolve().parents[1] / "infra/smolvm/inspection-image.json"
+    if manifest.is_file():
+        defaults["CONDERE_SMOL_IMAGE"] = verified_image(json.loads(manifest.read_text())["archive"])
     for name, value in defaults.items():
         if not values.get(name):
             values[name] = value

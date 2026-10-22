@@ -1,7 +1,10 @@
 """Installed local HTTP service; configuration alone never admits paid research."""
 
 import asyncio
+import hashlib
+import json
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -16,6 +19,8 @@ from condere.runtime.coordinator import AssessmentCoordinator
 from condere.runtime.evidence import EvidenceStore, object_client
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import AssessmentStore
+
+REPOSITORY = Path(__file__).resolve().parents[3]
 
 REQUIRED = (
     "CONDERE_API_URL",
@@ -38,6 +43,26 @@ REQUIRED = (
 )
 
 
+def verified_image(value: str) -> str:
+    if re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", value):
+        return value
+    manifest = REPOSITORY / "infra/smolvm/inspection-image.json"
+    try:
+        pin = json.loads(manifest.read_text())
+        archive = (REPOSITORY / Path(value).expanduser()).resolve()
+        expected = (REPOSITORY / pin["archive"]).resolve()
+        if archive != expected or not archive.is_file():
+            raise ValueError("Select the verified inspection archive or an immutable image digest.")
+        with archive.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != pin["archive_sha256"]:
+                raise ValueError("The inspection archive differs from its saved content hash.")
+    except (OSError, KeyError, json.JSONDecodeError):
+        raise ValueError(
+            "The local inspection image requires a valid build manifest and archive."
+        ) from None
+    return str(archive)
+
+
 def configuration(environment) -> dict[str, str]:
     missing = [name for name in REQUIRED if not environment.get(name)]
     if missing:
@@ -50,8 +75,7 @@ def configuration(environment) -> dict[str, str]:
     token = values["CONDERE_API_TOKEN"]
     if len(token) < 32 or any(char.isspace() for char in token):
         raise ValueError("Configure a bearer token with at least 32 non-whitespace characters.")
-    if "@sha256:" not in values["CONDERE_SMOL_IMAGE"]:
-        raise ValueError("Configure an immutable SmolVM image digest.")
+    values["CONDERE_SMOL_IMAGE"] = verified_image(values["CONDERE_SMOL_IMAGE"])
     return values
 
 

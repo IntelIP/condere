@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import socket
 import sys
@@ -16,10 +17,12 @@ import uvicorn
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from test_api import GateCoordinator
+from test_coordinator import native_case as native_case
 from test_service import ready_for_finalization
 from test_service import setup_case as setup_case
 
 from condere.interfaces.api import create_app
+from condere.runtime.state import content_hash
 
 pytestmark = [
     pytest.mark.integration,
@@ -160,3 +163,76 @@ async def test_stdio_retrieves_same_saved_result_and_explicit_writes(setup_case,
             stopped = await call(session, "cancel_assessment", {"assessment_id": created["id"]})
             assert stopped["status"] == "cancelled"
             assert service.state.operations(owner, created["id"]) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.environ.get("CONDERE_TEST_SANDBOX") != "1" or os.environ.get("CONDERE_TEST_OBJECTS") != "1",
+    reason="This complete protocol check requires native VMs and native object storage",
+)
+async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tmp_path):
+    service, owner, case, make, _, calls, created, _ = native_case
+    coordinator = make()
+    completed = asyncio.Event()
+    run = coordinator.run
+
+    async def execute(*args, **kwargs):
+        result = await run(*args, **kwargs)
+        completed.set()
+        return result
+
+    monkeypatch.setattr(coordinator, "run", execute)
+    app = create_app(service, coordinator, owner_tokens={owner: "a" * 40})
+    async with serve(app) as origin, connect(origin, tmp_path / "exports") as session:
+        admitted = await call(
+            session,
+            "admit_assessment",
+            {
+                "campaign_id": case["campaign_id"],
+                "request_key": case["request_key"],
+                "brief": case["brief"],
+            },
+        )
+        assert admitted["id"] == case["id"]
+        await asyncio.wait_for(completed.wait(), timeout=90)
+        identity = {"assessment_id": case["id"]}
+        report = await call(session, "read_report", identity)
+        assert report == service.report(owner, case["id"]).model_dump(mode="json")
+        assert len(report["findings"]["questions"]) == 17
+        assert len(report["findings"]["technical"]["findings"]) == 13
+        sources = await call(session, "list_sources", identity)
+        assert sources["total"] == 1
+        source = sources["sources"][0]
+        original = await call(session, "read_original", identity | {"source_id": source["id"]})
+        body = base64.b64decode(original["data_base64"])
+        assert body == b"Fictional source for the native storage integration check."
+        archive = await call(session, "export_assessment", identity)
+        with zipfile.ZipFile(archive["path"]) as package:
+            assert body in [package.read(name) for name in package.namelist()]
+        assert len(calls) == 4 and len(created) == 4
+        assert service.state.operations(owner, case["id"]) == []
+        from smol import ConnectOptions, Machine
+
+        remaining = {machine.id for machine in Machine.list(ConnectOptions(target="local"))}
+        assert not {sandbox.id for sandbox in created} & remaining
+        receipt = Path(__file__).resolve().parents[2] / ".artifacts/infrastructure/native-mcp.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(
+            json.dumps(
+                {
+                    "owner_id": owner,
+                    "assessment_id": case["id"],
+                    "source_id": source["id"],
+                    "source_sha256": original["sha256"],
+                    "report_hash": content_hash(report),
+                    "zip_sha256": archive["sha256"],
+                    "machines_deleted": [item.id for item in created],
+                    "research": "simulation",
+                    "storage": "native MinIO",
+                    "transport": "stdio and HTTP",
+                    "provider_operations": 0,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
