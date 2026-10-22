@@ -192,10 +192,10 @@ class AssessmentCoordinator:
         except Exception:
             logging.getLogger(__name__).warning("Assessment telemetry could not start.")
         try:
-            return await self._run(owner, assessment_id, **options)
+            with span_context:
+                return await self._run(owner, assessment_id, **options)
         finally:
             try:
-                span_context.close()
                 await asyncio.to_thread(self._record_telemetry, owner, assessment_id, trace_id)
             except Exception:
                 logging.getLogger(__name__).warning(

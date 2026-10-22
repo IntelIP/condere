@@ -35,10 +35,10 @@ restart check retained saved source identities and a complete dossier. Research
 models remain deterministic fixtures, so these results establish integration
 behavior rather than business conclusions.
 
-All six Langfuse services are healthy in a separate task-owned local VM. The
-synthetic trace retrieval check still fails after restart. Integrated tracing,
-remaining failure checks, the one live assessment, and retrieval inside both
-coding clients remain unfinished. No paid assessment has run. See the
+The complete fictional assessment now uses all selected infrastructure, including
+correlated Langfuse traces. It also completes with Langfuse stopped and reports
+missing telemetry through the API/MCP status. Live research and retrieval inside
+both coding clients remain unfinished. See the
 [installation guide](infra/README.md#api-and-coding-client-installation) and
 [handoff](roadmap.md#current-handoff) for working commands and prerequisites.
 

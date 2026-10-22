@@ -64,6 +64,26 @@ class Finding(Record):
     limitations: list[Text] = Field(default_factory=list)
     conflicts: list[Text] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def citation_source_ids(cls, value):
+        if (
+            isinstance(value, dict)
+            and "source_ids" not in value
+            and isinstance(value.get("citations"), list)
+        ):
+            identities = [
+                item.source_id if isinstance(item, Citation) else item.get("source_id")
+                for item in value["citations"]
+                if isinstance(item, (dict, Citation))
+            ]
+            return value | {
+                "source_ids": list(
+                    dict.fromkeys(item for item in identities if isinstance(item, str))
+                )
+            }
+        return value
+
     @model_validator(mode="after")
     def honest_basis(self) -> Self:
         if len(self.source_ids) != len(set(self.source_ids)):

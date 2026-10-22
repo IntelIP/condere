@@ -13,11 +13,32 @@ from condere.runtime.contracts import (
     TECHNICAL_FIELDS,
     AssessmentFindings,
     Citation,
+    Finding,
     IntakeBrief,
     Metric,
     QuestionAnswer,
     TechnicalReport,
 )
+
+
+def test_citations_supply_optional_source_ids_without_accepting_an_explicit_mismatch():
+    payload = {
+        "conclusion": "Fictional citation normalization check.",
+        "availability": "available",
+        "basis": "source_observed",
+        "citations": [
+            {
+                "source_id": "b" * 64,
+                "text_sha256": "a" * 64,
+                "start": 0,
+                "end": 5,
+                "quote": "hello",
+            }
+        ],
+    }
+    assert Finding.model_validate(payload).source_ids == ["b" * 64]
+    with pytest.raises(ValidationError, match="Every cited source"):
+        Finding.model_validate(payload | {"source_ids": []})
 
 
 def assumed(name, value, unit):

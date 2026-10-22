@@ -328,7 +328,7 @@ def worker_tools(
         return {key: record[key] for key in ("record_key", "version", "content_hash")}
 
     @tool
-    def submit_technical(payload: dict, supersedes_hash: str | None = None) -> dict:
+    def submit_technical(payload: TechnicalReport, supersedes_hash: str | None = None) -> dict:
         """Submit complete Technical findings and identify the prior hash when revising."""
         guard("submit_technical")
         return accepted(
@@ -337,13 +337,13 @@ def worker_tools(
                 assessment_id,
                 generation,
                 worker_id,
-                payload,
+                payload.model_dump(mode="json"),
                 supersedes_hash=supersedes_hash,
             )
         )
 
     @tool
-    def submit_question(payload: dict, supersedes_hash: str | None = None) -> dict:
+    def submit_question(payload: QuestionAnswer, supersedes_hash: str | None = None) -> dict:
         """Submit one assigned M1-M8 or B1-B9 answer for evidence and contract checks."""
         guard("submit_question")
         return accepted(
@@ -352,13 +352,13 @@ def worker_tools(
                 assessment_id,
                 generation,
                 worker_id,
-                payload,
+                payload.model_dump(mode="json"),
                 supersedes_hash=supersedes_hash,
             )
         )
 
     @tool
-    def submit_review(payload: dict, supersedes_hash: str | None = None) -> dict:
+    def submit_review(payload: FinalReview, supersedes_hash: str | None = None) -> dict:
         """Submit final review of the exact accepted hashes, preserving gaps and qualifications."""
         guard("submit_review")
         return accepted(
@@ -367,7 +367,7 @@ def worker_tools(
                 assessment_id,
                 generation,
                 worker_id,
-                payload,
+                payload.model_dump(mode="json"),
                 supersedes_hash=supersedes_hash,
             )
         )
