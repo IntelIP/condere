@@ -7,7 +7,7 @@ All spending transitions lock the campaign before the assessment and operation.
 
 import hashlib
 import json
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 from uuid import uuid4
 
@@ -107,6 +107,34 @@ class AssessmentStore:
     def connection(self):
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             yield connection
+
+    @asynccontextmanager
+    async def execution_lock(self, owner: str, assessment_id: str):
+        """One live coordinator per assessment; process loss releases the database session lock."""
+        async with await psycopg.AsyncConnection.connect(
+            self._dsn, row_factory=dict_row, autocommit=True
+        ) as connection:
+            row = await (
+                await connection.execute(
+                    "SELECT id FROM assessments WHERE id=%s AND owner_id=%s", (assessment_id, owner)
+                )
+            ).fetchone()
+            if row is None:
+                raise NotFound("Assessment not found.")
+            key = "condere-coordinator:" + assessment_id
+            locked = await (
+                await connection.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS acquired", (key,)
+                )
+            ).fetchone()
+            if not locked["acquired"]:
+                raise Conflict("This assessment already has a live coordinator.")
+            try:
+                yield
+            finally:
+                await connection.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s,0))", (key,)
+                )
 
     def setup(self) -> None:
         with self.connection() as connection:
@@ -578,6 +606,9 @@ class AssessmentStore:
                 "measurement_receipt",
                 "repository_inspection",
                 "repository_pin",
+                "repository_admission",
+                "execution_plan",
+                "worker_export",
                 "dossier",
             }:
                 raise Conflict("Source originals and execution receipts cannot be revised.")
@@ -600,6 +631,33 @@ class AssessmentStore:
                    ORDER BY kind,record_key,version""",
                 (assessment_id, kind, kind),
             ).fetchall()
+
+    def admit_repository(
+        self, owner: str, assessment_id: str, generation: int, repository: str, basis: dict
+    ) -> set[str]:
+        """Reserve one of three shared repository slots, including across continuations."""
+        if not repository or not basis:
+            raise ValueError("Repository admission needs its identity and evidence basis.")
+        with self.connection() as connection:
+            self._active(self._lock(connection, owner, assessment_id), generation)
+            rows = connection.execute(
+                "SELECT payload FROM records "
+                "WHERE assessment_id=%s AND kind='repository_admission'",
+                (assessment_id,),
+            ).fetchall()
+            admitted = {row["payload"]["repository"] for row in rows}
+            if repository in admitted:
+                return admitted
+            if len(admitted) >= 3:
+                raise Conflict("The assessment has already admitted its three repositories.")
+            payload = {"repository": repository, "basis": basis}
+            connection.execute(
+                """INSERT INTO records
+                   (assessment_id,kind,record_key,version,content_hash,payload)
+                   VALUES (%s,'repository_admission',%s,1,%s,%s)""",
+                (assessment_id, content_hash(repository), content_hash(payload), Jsonb(payload)),
+            )
+            return admitted | {repository}
 
     def assign_worker(
         self, owner: str, assessment_id: str, generation: int, key: str, assignment: dict

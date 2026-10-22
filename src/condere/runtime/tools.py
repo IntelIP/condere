@@ -2,9 +2,14 @@
 
 import base64
 import hashlib
+import json
+from functools import wraps
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
-from langchain_core.tools import tool
+from langchain_core.tools import ToolException
+from langchain_core.tools import tool as langchain_tool
+from pydantic import ValidationError
 
 from condere.runtime.calculations import Calculation
 from condere.runtime.calculations import calculate as evaluate_calculation
@@ -15,7 +20,7 @@ from condere.runtime.providers import ExaResearch
 from condere.runtime.repositories import acquire_repository, canonical_repository, stage_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
-from condere.runtime.state import Conflict, content_hash
+from condere.runtime.state import Conflict, NotFound, content_hash
 
 
 def worker_tools(
@@ -36,8 +41,6 @@ def worker_tools(
     if sandbox.id != assigned["machine_id"]:
         raise Conflict("Tools must use the worker's recorded machine.")
     allowed = {canonical_repository(url) for url in allowed_repositories}
-    if len(allowed) > 3:
-        raise ValueError("At most three repositories may be admitted to an assessment.")
     if research is not None:
         context = research.context
         if (
@@ -52,6 +55,28 @@ def worker_tools(
         current = service._worker(owner, assessment_id, generation, worker_id)
         if name not in current["assignment"]["permitted_tools"]:
             raise Conflict("The tool is outside this worker's assignment.")
+
+    def tool(function):
+        @wraps(function)
+        def invoke(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            except (ValueError, EvidenceError, NotFound, Conflict) as error:
+                # Cancellation/stale work must propagate; a running worker may correct bad input.
+                service._worker(owner, assessment_id, generation, worker_id)
+                detail = (
+                    json.dumps(error.errors(include_input=False, include_context=False))
+                    if isinstance(error, ValidationError)
+                    else str(error)
+                )
+                raise ToolException(detail) from error
+
+        registered = langchain_tool(invoke)
+        registered.handle_tool_error = True
+        registered.handle_validation_error = lambda error: json.dumps(
+            error.errors(include_input=False, include_context=False)
+        )
+        return registered
 
     @tool
     def read_assessment() -> dict:
@@ -182,8 +207,29 @@ def worker_tools(
             if normalized.is_absolute() or ".." in normalized.parts or str(normalized) != path:
                 raise ValueError("Inspection paths must be normalized repository-relative files.")
         repository_url = canonical_repository(repository_url)
-        if repository_url not in allowed:
-            raise ValueError("Repository is outside the assessment's admitted set.")
+        basis = (
+            {"basis": "reference supplied in the admitted brief"}
+            if repository_url in allowed
+            else None
+        )
+        if basis is None:
+            for record in state.records(owner, assessment_id, kind="source"):
+                source = SourceDocument.model_validate(record["payload"])
+                parsed = urlsplit(source.origin)
+                parts = parsed.path.strip("/").split("/")
+                if (
+                    source.kind == "web"
+                    and source.provenance.get("provider") == "exa"
+                    and parsed.hostname == "github.com"
+                    and len(parts) >= 2
+                    and canonical_repository("https://github.com/" + "/".join(parts[:2]))
+                    == repository_url
+                ):
+                    basis = {"basis": "saved public research result", "source_id": source.id}
+                    break
+        if basis is None:
+            raise ValueError("Repository is outside the brief and saved public research results.")
+        admitted = state.admit_repository(owner, assessment_id, generation, repository_url, basis)
         pin_key = content_hash(repository_url)
         pins = {
             item["record_key"]: item["payload"]
@@ -196,7 +242,7 @@ def worker_tools(
             commit = pinned["commit"]
         snapshot = acquire_repository(
             repository_url,
-            allowed_repositories=allowed,
+            allowed_repositories=admitted,
             destination=repository_cache,
             commit=commit,
         )

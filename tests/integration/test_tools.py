@@ -4,17 +4,16 @@ import base64
 import hashlib
 import json
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from pydantic import ValidationError
 from test_providers import research_response
 from test_service import accept_findings, question, worker
 from test_service import setup_case as setup_case
 
 from condere.runtime.contracts import QuestionAnswer
-from condere.runtime.evidence import EvidenceError
 from condere.runtime.providers import ExaResearch, ProviderContext
 from condere.runtime.repositories import RepositorySnapshot
 from condere.runtime.state import Conflict
@@ -102,13 +101,11 @@ def test_research_to_citation_and_assigned_submission(tool_case):
     assert json.loads(base64.b64decode(original["content"]))["requestId"] == "exa-simulation"
     payload = question("M1") | {"source_ids": [source_id], "citations": [window["citation"]]}
     forged = payload | {"citations": [window["citation"] | {"quote": "Invented quotation"}]}
-    with pytest.raises((ValidationError, EvidenceError)):
-        tools["submit_question"].invoke({"payload": forged})
+    assert isinstance(tools["submit_question"].invoke({"payload": forged}), str)
     accepted = tools["submit_question"].invoke({"payload": payload})
     assert tools["submit_question"].invoke({"payload": payload}) == accepted
     assert accepted["version"] == 1
-    with pytest.raises(Conflict, match="outside"):
-        tools["submit_question"].invoke({"payload": question("B1")})
+    assert "outside" in tools["submit_question"].invoke({"payload": question("B1")})
     assert service.state.records(owner, case["id"], kind="question")[0]["payload"] == (
         QuestionAnswer.model_validate(payload).model_dump(mode="json")
     )
@@ -151,8 +148,7 @@ def test_reviewer_reads_full_saved_evidence_without_research_tools(tool_case):
         offset = result["next_offset"]
     assert text == raw
     assert requests == []
-    with pytest.raises(ValidationError):
-        tools["submit_review"].invoke({"payload": {}})
+    assert "Field required" in tools["submit_review"].invoke({"payload": {}})
 
 
 def test_calculation_preserves_decimals_unknowns_and_receipt_requirements(tool_case):
@@ -197,8 +193,7 @@ def test_calculation_preserves_decimals_unknowns_and_receipt_requirements(tool_c
             calculation["inputs"][1],
         ]
     }
-    with pytest.raises(EvidenceError, match="execution receipt"):
-        tools["calculate"].invoke({"calculation": measured})
+    assert "execution receipt" in tools["calculate"].invoke({"calculation": measured})
 
 
 def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
@@ -227,7 +222,7 @@ def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
 
     def acquire(url, **kwargs):
         commits.append(kwargs["commit"])
-        return snapshot
+        return replace(snapshot, repository=url)
 
     monkeypatch.setattr("condere.runtime.tools.acquire_repository", acquire)
     monkeypatch.setattr(
@@ -246,17 +241,32 @@ def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
     assert result["inspection"]["commit"] == "a" * 40
     tools["inspect_repository"].invoke(request)
     assert commits == [None, "a" * 40]
-    with pytest.raises(Conflict, match="different repository commit"):
-        tools["inspect_repository"].invoke(request | {"commit": "b" * 40})
-    with pytest.raises(ValueError, match="outside"):
-        tools["inspect_repository"].invoke(
-            request | {"repository_url": "https://github.com/other/repo"}
-        )
+    assert "different repository commit" in tools["inspect_repository"].invoke(
+        request | {"commit": "b" * 40}
+    )
+    assert "outside" in tools["inspect_repository"].invoke(
+        request | {"repository_url": "https://github.com/other/repo"}
+    )
     sandbox.download_files = lambda paths: [
         SimpleNamespace(content=b"Changed guest file", error=None)
     ]
-    with pytest.raises(EvidenceError, match="differs"):
-        tools["inspect_repository"].invoke(request)
+    assert "differs" in tools["inspect_repository"].invoke(request)
     records = service.state.records(owner, case["id"], kind="repository_inspection")
     assert len(records) == 2
     assert all(item["payload"]["machine_id"] == sandbox.id for item in records)
+    discovered = "https://github.com/discovered/project"
+    service.evidence.save_source(
+        owner,
+        case["id"],
+        kind="web",
+        origin=discovered + "/blob/main/README.md",
+        original=b"Fictional public research result.",
+        text="Fictional public research result.",
+        media_type="text/plain",
+        provenance={"provider": "exa"},
+        limitations=["Simulated source; not real research."],
+    )
+    sandbox.download_files = lambda paths: [SimpleNamespace(content=content, error=None)]
+    discovered_result = tools["inspect_repository"].invoke(request | {"repository_url": discovered})
+    assert discovered_result["inspection"]["repository_url"] == discovered
+    assert len(service.state.records(owner, case["id"], kind="repository_admission")) == 2

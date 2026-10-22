@@ -5,6 +5,7 @@ import os
 
 import pytest
 from langchain_core.messages import AIMessage
+from pydantic import Field
 from test_sandbox import RehearsalModel
 from test_sandbox import sandboxes as sandboxes
 from test_service import question
@@ -13,6 +14,19 @@ from test_service import setup_case as setup_case
 from condere.runtime.checkpoints import checkpoint_store
 from condere.runtime.state import Conflict
 from condere.runtime.workers import run_worker
+
+
+class CorrectingModel(RehearsalModel):
+    observed_errors: list[str] = Field(default_factory=list)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.observed_errors.extend(
+            str(message.content)
+            for message in messages
+            if getattr(message, "status", None) == "error"
+        )
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
 
 pytestmark = [
     pytest.mark.integration,
@@ -31,10 +45,20 @@ async def test_assigned_worker_saves_all_answers_and_reuses_completed_checkpoint
     service, owner, case = setup_case
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
-    model = RehearsalModel(
+    model = CorrectingModel(
         responses=[
             AIMessage(
                 content="", tool_calls=[{"name": "read_assessment", "args": {}, "id": "read"}]
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_question",
+                        "args": {"payload": question("B1")},
+                        "id": "wrong-role",
+                    }
+                ],
             ),
             AIMessage(
                 content="",
@@ -72,6 +96,7 @@ async def test_assigned_worker_saves_all_answers_and_reuses_completed_checkpoint
             {"configurable": {"thread_id": completed["thread_id"]}}
         )
         assert saved is not None
+        assert any("outside" in message for message in model.observed_errors)
     calls = len(model.seen_system)
     async with checkpoint_store(
         os.environ["CONDERE_CHECKPOINT_URL"], application_dsn=os.environ["CONDERE_DATABASE_URL"]
