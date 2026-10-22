@@ -9,6 +9,8 @@ label; this is not LangChain's hosted Managed Deep Agents service.
 
 ## Start here
 
+- [Execution goal](goal.md): reusable instruction to implement, integrate, and
+  test the complete system through Roadmap Milestone 3.
 - [System design](system_design.md): product scope, architecture, responsibilities,
   research coverage, storage, and security boundaries.
 - [Backlog](backlog.md): bounded user outcomes, dependencies, and acceptance criteria.
