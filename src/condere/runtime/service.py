@@ -103,7 +103,11 @@ class AssessmentService:
             for item in requirements
         ):
             raise ValueError("Every capability requirement needs a scenario, category, and name.")
-        tools = READ_TOOLS + ([] if role == "review" else ["search_public", "inspect_repository"])
+        tools = READ_TOOLS + (
+            []
+            if role == "review"
+            else ["search_public", "fetch_public_source", "inspect_repository"]
+        )
         tools += [
             "submit_review"
             if role == "review"

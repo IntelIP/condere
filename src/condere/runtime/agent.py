@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 from deepagents import create_deep_agent
+from deepagents._models import get_model_identifier, get_model_provider
 from deepagents.profiles import (
     GeneralPurposeSubagentProfile,
     HarnessProfile,
@@ -40,13 +41,17 @@ def build_agent(
     model: BaseChatModel,
     sandbox: SmolSandbox,
     *,
-    profile_key: str,
     assignment: str,
     tools=(),
     checkpointer=None,
     methods_root: Path = METHODS_ROOT,
 ):
     """The application creates separate workers/VMs; nested shared-VM delegation is disabled."""
+    identifier, provider = get_model_identifier(model), get_model_provider(model)
+    profile_key = f"{provider}:{identifier}" if provider and identifier else identifier
+    if not profile_key or ":" not in profile_key:
+        raise ValueError("The worker model needs a resolvable identity for its isolation profile.")
+    # Deep Agents 0.7.29 resolves profiles by model identity, not by worker identity.
     register_harness_profile(
         profile_key,
         HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)),

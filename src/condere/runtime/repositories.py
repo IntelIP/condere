@@ -8,6 +8,7 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
 
@@ -186,7 +187,8 @@ def stage_repository(snapshot: RepositorySnapshot, sandbox: SmolSandbox) -> dict
     ):
         raise ValueError("Repository archive changed after acquisition.")
     guest_archive = f"/tmp/{snapshot.identity}.tar.gz"
-    guest_directory = f"/workspace/repositories/{snapshot.identity}"
+    # Repeated inspection must not reuse a workspace that untrusted code could have changed.
+    guest_directory = f"/workspace/repositories/{snapshot.identity}-{uuid4().hex}"
     # Trusted acquisition uses its own bound; agent file tools retain their smaller limit.
     sandbox.machine.write_file(guest_archive, snapshot.archive.read_bytes())
     script = """

@@ -1,6 +1,7 @@
 """Real local-engine checks; enable explicitly with CONDERE_TEST_SANDBOX=1."""
 
 import asyncio
+import hashlib
 import json
 import os
 import shlex
@@ -183,7 +184,6 @@ async def test_deep_agent_uses_real_sandbox_and_discovers_all_skills(sandboxes):
     agent = build_agent(
         model,
         sandboxes[0],
-        profile_key="condere:fixture",
         assignment="Test only: execute a harmless file roundtrip. No research or provider calls.",
     )
     state = await agent.ainvoke({"messages": [{"role": "user", "content": "Run the rehearsal."}]})
@@ -224,6 +224,13 @@ def test_admitted_repository_exact_commit_survives_vm_deletion(sandboxes):
     )
     assert result.exit_code == 0
     assert result.output.strip() == original["sha256"]
+    # An agent may inspect the same snapshot twice after modifying its first working copy.
+    sandbox.machine.write_file(staged["path"] + "/README.md", b"Changed first working copy")
+    repeated = stage_repository(snapshot, sandbox)
+    assert repeated["path"] != staged["path"]
+    reread = sandbox.download_files([repeated["path"] + "/README.md"])[0]
+    assert reread.error is None
+    assert hashlib.sha256(reread.content).hexdigest() == original["sha256"]
     sandbox.close(delete=True)
     sandboxes.pop(0)
     assert snapshot.archive.exists()

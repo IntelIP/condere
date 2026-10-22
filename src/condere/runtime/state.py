@@ -577,6 +577,7 @@ class AssessmentStore:
                 "source",
                 "measurement_receipt",
                 "repository_inspection",
+                "repository_pin",
                 "dossier",
             }:
                 raise Conflict("Source originals and execution receipts cannot be revised.")
