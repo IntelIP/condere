@@ -12,6 +12,7 @@ from test_service import question
 from test_service import setup_case as setup_case
 
 from condere.runtime.checkpoints import checkpoint_store
+from condere.runtime.contracts import CAPABILITY_CATEGORIES, TECHNICAL_FIELDS
 from condere.runtime.state import Conflict
 from condere.runtime.workers import run_worker
 
@@ -116,6 +117,85 @@ async def test_assigned_worker_saves_all_answers_and_reuses_completed_checkpoint
         assert (
             artifact["question:" + record["record_key"]]["content_hash"] == record["content_hash"]
         )
+    assert service.state.operations(owner, case["id"]) == []
+
+
+@pytest.mark.asyncio
+async def test_technical_file_submission_keeps_native_boundary_and_validation(
+    setup_case, sandboxes, tmp_path
+):
+    service, owner, case = setup_case
+    unknown = dict(
+        conclusion="Not established by this fixture.",
+        availability="unavailable",
+        limitations=["No research or measurement represented."],
+    )
+    report = dict(
+        findings={field: unknown for field in TECHNICAL_FIELDS},
+        capabilities=[
+            dict(
+                scenario="primary",
+                category=category,
+                name=category,
+                status="unavailable",
+                value=None,
+                finding=unknown,
+            )
+            for category in sorted(CAPABILITY_CATEGORIES)
+        ],
+        inspection_limitations=["Scripted native file-submission fixture."],
+    )
+    files = sandboxes[0].upload_files(
+        [
+            ("/workspace/technical-draft.json", json.dumps(report).encode()),
+            ("/workspace/invalid-technical.json", b'{"findings": {}}'),
+        ]
+    )
+    assert all(item.error is None for item in files)
+    attempts = [
+        {"path": "/workspace/missing-technical.json"},
+        {"path": "/etc/passwd"},
+        {"path": "/workspace/invalid-technical.json"},
+        {"payload": report, "path": "/workspace/technical-draft.json"},
+        {"path": "/workspace/technical-draft.json"},
+    ]
+    model = CorrectingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_technical",
+                        "args": args,
+                        "id": f"file-submit-{index}",
+                    }
+                ],
+            )
+            for index, args in enumerate(attempts)
+        ]
+        + [AIMessage(content="The complete fictional Technical file is accepted.")]
+    )
+    async with checkpoint_store(
+        os.environ["CONDERE_CHECKPOINT_URL"], application_dsn=os.environ["CONDERE_DATABASE_URL"]
+    ) as checkpointer:
+        completed = await run_worker(
+            service,
+            owner=owner,
+            assessment_id=case["id"],
+            generation=case["generation"],
+            role="technical",
+            sandbox=sandboxes[0],
+            model=model,
+            checkpointer=checkpointer,
+            research=None,
+            repository_cache=tmp_path,
+            allowed_repositories=set(),
+        )
+    assert completed["status"] == "completed"
+    assert len(model.observed_errors) >= 4
+    saved = service.state.records(owner, case["id"], kind="technical")
+    assert len(saved) == 1 and saved[0]["version"] == 1
+    assert set(saved[0]["payload"]["findings"]) == set(TECHNICAL_FIELDS)
     assert service.state.operations(owner, case["id"]) == []
 
 

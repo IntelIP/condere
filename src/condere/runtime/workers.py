@@ -82,6 +82,14 @@ async def run_worker(
             "complete this assignment. Do not create nested workers or request internal-stage "
             "human approval. The trusted application saves the accepted output artifact."
         )
+        if role == "technical":
+            assignment += (
+                " For the large Technical report, use the sandbox to build a JSON file at "
+                "/workspace/technical-draft.json, reusing complete citation objects and "
+                "checking that the JSON parses. Then call submit_technical with path set "
+                "to that file. This avoids repeatedly copying the full nested report into "
+                "a tool call; all evidence and required-field checks still apply."
+            )
         agent = await asyncio.to_thread(
             build_agent,
             model,

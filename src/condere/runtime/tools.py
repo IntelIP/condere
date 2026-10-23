@@ -328,9 +328,27 @@ def worker_tools(
         return {key: record[key] for key in ("record_key", "version", "content_hash")}
 
     @tool
-    def submit_technical(payload: TechnicalReport, supersedes_hash: str | None = None) -> dict:
-        """Submit complete Technical findings and identify the prior hash when revising."""
+    def submit_technical(
+        payload: TechnicalReport | None = None,
+        supersedes_hash: str | None = None,
+        path: str | None = None,
+    ) -> dict:
+        """Submit complete Technical findings as a payload OR a sandbox JSON file path.
+
+        Build large reports in /workspace and pass their path to avoid copying nested
+        fields into a tool call. All evidence and coverage checks still apply.
+        Identify the prior hash when revising an accepted report.
+        """
         guard("submit_technical")
+        if path is not None:
+            if payload is not None:
+                raise ValueError("Supply exactly one of payload or path.")
+            downloaded = sandbox.download_files([path])[0]
+            if downloaded.error or downloaded.content is None:
+                raise ValueError("Cannot read Technical JSON from the assigned sandbox.")
+            payload = TechnicalReport.model_validate_json(downloaded.content)
+        elif payload is None:
+            raise ValueError("Supply exactly one of payload or path.")
         return accepted(
             service.submit_technical(
                 owner,
