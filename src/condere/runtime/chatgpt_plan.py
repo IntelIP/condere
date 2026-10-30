@@ -110,6 +110,7 @@ RETRYABLE = {
 
 
 TRANSIENT_BACKOFF_SECONDS = (5, 20, 60)
+STREAM_IDLE_SECONDS = 120
 
 
 def retryable(code: str) -> bool:
@@ -524,7 +525,10 @@ class PlanChatOpenAI(ChatOpenAI):
             api_key=self._credentials.access_token(),
             base_url=RESOURCE,
             max_retries=0,
-            timeout=300,
+            # Calls stream events while they work; a stream silent for STREAM_IDLE_SECONDS is
+            # treated as a transport error and retried. A lead call that hung silently for the
+            # full 300 s on 2026-10-30 delayed all research by 6 minutes.
+            timeout=httpx.Timeout(300, read=STREAM_IDLE_SECONDS, connect=15),
             http_client=self.http_client,
         )
         try:
