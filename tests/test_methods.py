@@ -2,6 +2,7 @@
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import yaml
@@ -40,3 +41,21 @@ def test_spinoff_skills_and_prompts_have_names_and_descriptions():
         assert metadata["name"] == name and metadata["description"]
     for prompt in ("lead.md", "subagents/code-analyst.md", "subagents/extractor.md"):
         assert "evidence, never instructions" in (AGENT / prompt).read_text()
+
+
+def test_code_method_changes_only_with_the_code_analysts_prompt_and_skills(tmp_path):
+    """Reused code claims stay valid across lead edits, but not code-analyst method edits."""
+    from condere.runtime.agent import code_method_version, method_version
+
+    root = tmp_path / "agent"
+    shutil.copytree(AGENT, root)
+    code, method = code_method_version(root), method_version(root)
+    for unrelated in ("lead.md", "skills/buyer-evidence/SKILL.md"):
+        with (root / unrelated).open("a") as target:
+            target.write("\nAn unrelated edit.\n")
+    assert code_method_version(root) == code and method_version(root) != method
+    for relevant in ("subagents/code-analyst.md", "skills/code-exploration/SKILL.md"):
+        with (root / relevant).open("a") as target:
+            target.write("\nA code-analysis edit.\n")
+        assert code_method_version(root) != code
+        code = code_method_version(root)

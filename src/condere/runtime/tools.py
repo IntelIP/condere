@@ -167,6 +167,8 @@ def worker_tools(
             },
         }
         if role == "lead":
+            # Code claims another assessment verified for the same commit; listed as candidates.
+            result["reused_code_analysis"] = service.reused_code_analysis(owner, assessment_id)
             result["candidate_claims"] = service.candidate_claims(owner, assessment_id)
         return result
 

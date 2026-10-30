@@ -77,14 +77,14 @@ BUILD_PLAN = {
 }
 
 
-def publish_spinoff(service, owner, case, source_id):
+def publish_spinoff(service, owner, case, source_id, lead=None):
     """Publish a fictional result through the service contract, without VMs or providers."""
     from test_service import worker
 
     from condere.runtime.decision import decide
 
     generation = case["generation"]
-    lead = worker(service, owner, case, "lead")
+    lead = lead or worker(service, owner, case, "lead")
     quote = service.evidence.text(owner, case["id"], source_id)[:20]
     service.submit_analysis(
         owner, case["id"], generation, lead["id"], analysis_payload(source_id, quote)

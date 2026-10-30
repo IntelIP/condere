@@ -140,6 +140,7 @@ class EvidenceStore:
         provenance: dict,
         limitations: list[str],
         retrieved_at: datetime | None = None,
+        expected_id: str | None = None,
     ) -> SourceDocument:
         self.state.get(owner, assessment_id)  # Authenticate before any object-store access.
         text_bytes = text.encode("utf-8")
@@ -163,12 +164,37 @@ class EvidenceStore:
         source = SourceDocument(
             id=content_hash(metadata | {"retrieved_at": timestamp.isoformat()}), **metadata
         )
+        if expected_id is not None and source.id != expected_id:
+            raise EvidenceError("A copied source would not keep its original identity.")
         self._put_object(assessment_id, original, media_type)
         self._put_object(assessment_id, text_bytes, "text/plain; charset=utf-8")
         self.state.append_record(
             owner, assessment_id, "source", source.id, source.model_dump(mode="json")
         )
         return source
+
+    def copy_source(
+        self, owner: str, from_assessment: str, to_assessment: str, source_id: str
+    ) -> SourceDocument:
+        """Save one owner's source into another of their assessments under the same identity.
+
+        The original bytes and text are read back through their hash checks and saved through
+        `save_source` with identical metadata, so the ID, and every quote against it, still hold.
+        """
+        source = self.source(owner, from_assessment, source_id)
+        return self.save_source(
+            owner,
+            to_assessment,
+            kind=source.kind,
+            origin=source.origin,
+            original=self.original(owner, from_assessment, source_id),
+            text=self.text(owner, from_assessment, source_id),
+            media_type=source.media_type,
+            provenance=source.provenance,
+            limitations=source.limitations,
+            retrieved_at=source.retrieved_at,
+            expected_id=source_id,
+        )
 
     def source(self, owner: str, assessment_id: str, source_id: str) -> SourceDocument:
         for record in self.state.records(owner, assessment_id, kind="source"):

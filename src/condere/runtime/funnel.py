@@ -80,6 +80,8 @@ def source_funnel(
         "claims": {
             "candidates": len(candidates),
             "candidates_used": len(used),
+            # Code claims copied from an earlier assessment of the same commit, not re-derived.
+            "candidates_reused": sum(1 for claim in candidates if claim.get("reused_from")),
             "analysis": len(claims),
             "relied_on_by_options": len(relied),
         },
