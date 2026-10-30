@@ -39,19 +39,32 @@ when evidence changes them:
 
 1. Read the brief with `read_assessment`. If it supplies a URL (a post, video,
    newsletter or repository), retrieve that first: it is the starting point.
-2. Asset (`asset-understanding` skill). Delegate code reading to `code-analyst`.
-3. Rights (`rights-and-ownership`).
-4. Options (`open-core-boundary`).
-5. Buyer evidence for the strongest options (`buyer-evidence`,
-   `search-routing`). Delegate reading of many sources to `extractor`.
-6. Economics and the next test (`economics`, `next-test`) where they change the
+2. Asset and rights (`asset-understanding`, `rights-and-ownership`). Delegate
+   code reading to `code-analyst` once, with the complete scope in one task:
+   components and paths, build and deployment, dependencies and licenses,
+   operating burden, maturity. Do not send it overlapping follow-ups; ask only
+   about a specific gap its answer left.
+3. Options (`open-core-boundary`).
+4. Buyer evidence for the options (`buyer-evidence`, `search-routing`). This is
+   where most decisions are won or lost; spend your research here. In a single
+   turn, delegate several `extractor` tasks in parallel, one per source route,
+   each with the same buyer questions (who has the pain, what it costs, what
+   they use today, what they pay, why they would or would not switch) and a
+   recency window of about the last 12 months:
+   - practitioners on Reddit (name the relevant communities) and Hacker News;
+   - practitioners on X;
+   - news, vendors, competitors and current pricing pages;
+   - talks and demos on YouTube where the capability is shown in use.
+   Ask each to run its searches and return dated claims. Then search again only
+   where the claims leave a decision-changing gap.
+5. Economics and the next test (`economics`, `next-test`) where they change the
    options' cases.
-7. Submit the analysis. Fix every rejection's stated cause and resubmit.
+6. Submit the analysis. Fix every rejection's stated cause and resubmit.
 
-Delegate with a specific task: the question, the sources or paths to read, and
-the claim IDs to use. Subagents return claims; you merge them, renumber IDs if
-needed, and keep their quotes exact. You read summaries and claims, not raw
-pages.
+Delegate with a specific task: the question, the route or sources to use, and
+the expected output. Subagents return claims; you merge them, assign IDs, and
+keep their quotes exact. You read their claims and summaries, not raw pages;
+open a source yourself only to settle a conflict or check a decisive quote.
 
 ## Evidence discipline
 

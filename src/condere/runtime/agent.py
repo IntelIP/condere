@@ -234,13 +234,15 @@ def build_lead_agent(
         {
             "name": "extractor",
             "description": (
-                "Reads saved sources, or runs a named search, and returns attributed claims "
-                "with exact quotes and publication dates. Give it the question and the "
-                "source IDs or search to run."
+                "Researches one source route (Reddit and Hacker News, X, news and pricing, or "
+                "YouTube) or reads given sources, and returns attributed claims with exact "
+                "quotes and publication dates. Give it the buyer questions, the route or source "
+                "IDs, and the recency window. Several can run in parallel."
             ),
             "system_prompt": (methods_root / "subagents/extractor.md").read_text(),
             "model": extract_model,
             "tools": chosen(EXTRACTOR_TOOLS),
+            "skills": ["/workspace/skills/"],
             "response_format": ToolStrategy(ClaimBatch),
             "middleware": [_context_editing()],
         },
