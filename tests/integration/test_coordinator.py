@@ -252,10 +252,23 @@ def native_case(tmp_path, monkeypatch, request):
 @pytest.mark.asyncio
 async def test_native_lead_run_records_analysis_and_one_decision(native_case):
     service, owner, case, make, _, calls, created, artifacts, jev = native_case
-    decision = await make().run(owner, case["id"])
-    assert decision["decision"]["verdict"]["value"] == "pursue"
-    assert decision["decision"]["option"]["value"] == "O1"
-    assert decision["analysis_hash"] == service.analysis_hash(owner, case["id"])
+    result = await make().run(owner, case["id"])
+    assert result.schema_version == "condere.spinoff.v1"
+    assert result.decision.verdict.value == "pursue"
+    assert result.decision.option.value == "O1"
+    assert result.reasoning.thesis.startswith("Keep the engine open")
+    assert service.decision(owner, case["id"])["analysis_hash"] == service.analysis_hash(
+        owner, case["id"]
+    )
+    assert len(result.model_dump_json()) < 20_000
+    assert service.state.get(owner, case["id"])["status"] == "completed"
+    claims = service.artifact(owner, case["id"], "artifacts/claims.json")
+    assert claims["sha256"] == result.claims.full.sha256
+    assert "upgrades keep breaking" in claims["text"]
+    reasoning = service.artifact(owner, case["id"], "artifacts/reasoning.md", limit=200)
+    assert reasoning["next_offset"] == 200
+    assert (await make().run(owner, case["id"])) == result
+    assert service.report(owner, case["id"]) == result
     assert sorted(calls) == [("code-analyst", 1), ("extractor", 1), ("lead", 1)]
     assert jev.asked == ["assess option O1", "assess option O2", "choose verdict, option and route"]
     [worker] = service.state.workers(owner, case["id"])
@@ -266,7 +279,7 @@ async def test_native_lead_run_records_analysis_and_one_decision(native_case):
     raw = (artifacts / case["id"] / export["record_key"] / "accepted.json").read_bytes()
     assert hashlib.sha256(raw).hexdigest() == export["payload"]["sha256"]
     [brief] = service.state.records(owner, case["id"], kind="decision_brief")
-    assert brief["payload"]["sha256"] == decision["decision"]["brief"]["sha256"]
+    assert brief["payload"]["sha256"] == result.decision.brief.sha256
     assert service.state.operations(owner, case["id"]) == []
     existing = {item.id for item in Machine.list(ConnectOptions(target="local"))}
     assert not {sandbox.id for sandbox in created} & existing
@@ -329,8 +342,8 @@ async def test_continuation_after_an_unfinished_lead_reaches_the_decision(native
         await make().run(owner, case["id"])
     with pytest.raises(Conflict, match="private-query terms"):
         await make().run(owner, case["id"], resume=True, private_terms=("changed",))
-    decision = await make().run(owner, case["id"], resume=True)
-    assert decision["decision"]["verdict"]["value"] == "pursue"
+    result = await make().run(owner, case["id"], resume=True)
+    assert result.decision.verdict.value == "pursue"
     assert ("lead", 2) in calls
     assert service.state.spending(owner, case["id"])["budget"]["available_microusd"] == 10_000_000
 

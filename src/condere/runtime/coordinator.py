@@ -287,7 +287,10 @@ class AssessmentCoordinator:
                                     self.service.finalize_screen, owner, assessment_id, generation
                                 )
                 if plan["stages"] == [list(stage) for stage in LEAD_STAGES]:
-                    return await asyncio.to_thread(self._decide, owner, assessment_id, generation)
+                    await asyncio.to_thread(self._decide, owner, assessment_id, generation)
+                    return await asyncio.to_thread(
+                        self.service.finalize_spinoff, owner, assessment_id, generation
+                    )
                 creation = asyncio.create_task(
                     asyncio.to_thread(
                         SmolSandbox.create,

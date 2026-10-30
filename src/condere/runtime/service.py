@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from condere.runtime.agent import method_version
+from condere.runtime.bundle import artifact_link, build_result, render_artifacts
 from condere.runtime.calculations import calculate
 from condere.runtime.contracts import (
     QUESTION_IDS,
@@ -26,7 +27,7 @@ from condere.runtime.dossier import (
 )
 from condere.runtime.evidence import EvidenceError, EvidenceStore, SourceDocument
 from condere.runtime.reporting import render_figures, render_html
-from condere.runtime.spinoff import Analysis
+from condere.runtime.spinoff import Analysis, BuildPlan, Decision, SpinoffResult
 from condere.runtime.state import AssessmentStore, Conflict, NotFound, content_hash
 
 POLICY_VERSION = "condere-mda-v3"
@@ -588,18 +589,119 @@ class AssessmentService:
         )
         return dossier
 
-    def report(self, owner: str, assessment_id: str) -> Dossier | ScreeningResult:
+    def _source_index(self, owner, assessment_id) -> list[dict]:
+        heads = self._heads(self.state.records(owner, assessment_id, kind="source"))
+        index = []
+        for record in heads.values():
+            source = SourceDocument.model_validate(record["payload"])
+            provenance = source.provenance
+            index.append(
+                {
+                    "id": source.id,
+                    "kind": source.kind,
+                    "origin": source.origin,
+                    "title": provenance.get("title"),
+                    "published_at": provenance.get("published_at"),
+                    "retrieved_at": source.retrieved_at.isoformat(),
+                    "provider": provenance.get("provider"),
+                    "origin_group": provenance.get("origin_group"),
+                    "limitations": source.limitations,
+                }
+            )
+        return sorted(index, key=lambda item: item["id"])
+
+    def finalize_spinoff(self, owner, assessment_id, generation) -> SpinoffResult:
+        """Write the artifacts, then atomically publish the compact result and complete."""
+        assessment = self.state.get(owner, assessment_id)
+        self._compatible(assessment)
+        analysis = self.analysis(owner, assessment_id)
+        saved = self.decision(owner, assessment_id)
+        if saved is None or saved["analysis_hash"] != self.analysis_hash(owner, assessment_id):
+            raise Conflict("The decision must be made from the current analysis before delivery.")
+        decision = Decision.model_validate(saved["decision"])
+        heads = self._heads(self.state.records(owner, assessment_id))
+        brief = heads["decision_brief:main"]["payload"]["text"]
+        plan = heads.get("build_plan:main")
+        build_plan = BuildPlan.model_validate(plan["payload"]) if plan else None
+        sources = self._source_index(owner, assessment_id)
+        links = {}
+        for ref, (text, media_type, summary) in render_artifacts(
+            analysis, decision, brief, sources
+        ).items():
+            link = artifact_link(assessment_id, ref, text, media_type, summary)
+            self._revise_key(
+                owner, assessment_id, "artifact", ref, link.model_dump() | {"text": text}
+            )
+            links[ref] = link
+        plans = self.state.records(owner, assessment_id, kind="execution_plan")
+        result = SpinoffResult.model_validate(
+            build_result(
+                assessment_id=assessment_id,
+                created_at=datetime.now(UTC),
+                brief=assessment["brief"],
+                repositories=plans[0]["payload"]["repository_candidates"] if plans else [],
+                analysis=analysis,
+                decision=decision,
+                build_plan=build_plan,
+                links=links,
+                source_count=len(sources),
+            )
+        )
+        expected = {
+            key: heads[key]["content_hash"]
+            for key in ("analysis:main", "decision:main", "build_plan:main")
+            if key in heads
+        }
+        self.state.publish_dossier(
+            owner, assessment_id, generation, result.model_dump(mode="json"), expected
+        )
+        return result
+
+    def _revise_key(self, owner, assessment_id, kind, key, payload) -> dict:
+        heads = self._heads(self.state.records(owner, assessment_id, kind=kind))
+        prior = heads.get(f"{kind}:{key}")
+        return self.state.append_record(
+            owner,
+            assessment_id,
+            kind,
+            key,
+            payload,
+            supersedes_hash=None if prior is None else prior["content_hash"],
+        )
+
+    def artifact(self, owner, assessment_id, ref: str, *, offset: int = 0, limit: int = 20_000):
+        """A window of one saved artifact; retrieval never starts research."""
+        if offset < 0 or not 1 <= limit <= 100_000:
+            raise ValueError("Read 1-100,000 characters from a nonnegative offset.")
+        heads = self._heads(self.state.records(owner, assessment_id, kind="artifact"))
+        record = heads.get(f"artifact:{ref}")
+        if record is None:
+            raise NotFound(f"No artifact named {ref}.")
+        payload = record["payload"]
+        text = payload["text"]
+        end = min(offset + limit, len(text))
+        return {
+            "ref": ref,
+            "sha256": payload["sha256"],
+            "media_type": payload["media_type"],
+            "summary": payload["summary"],
+            "total_characters": len(text),
+            "offset": offset,
+            "next_offset": end if end < len(text) else None,
+            "text": text[offset:end],
+        }
+
+    def report(self, owner: str, assessment_id: str) -> Dossier | ScreeningResult | SpinoffResult:
         records = self.state.records(owner, assessment_id, kind="dossier")
         if not records:
             raise NotFound(
                 "A final dossier has not been delivered; accepted partial records remain available."
             )
         saved = self._heads(records)["dossier:final"]
-        model = (
-            ScreeningResult
-            if saved["payload"].get("schema_version") == "condere.screen.v1"
-            else Dossier
-        )
+        model = {
+            "condere.screen.v1": ScreeningResult,
+            "condere.spinoff.v1": SpinoffResult,
+        }.get(saved["payload"].get("schema_version"), Dossier)
         return model.model_validate(saved["payload"])
 
     def export(self, owner: str, assessment_id: str, target: Path) -> Path:

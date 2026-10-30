@@ -816,7 +816,7 @@ class AssessmentStore:
             heads = connection.execute(
                 """SELECT DISTINCT ON (kind,record_key) kind,record_key,content_hash
                    FROM records WHERE assessment_id=%s
-                   AND kind IN ('screen','question','review')
+                   AND kind IN ('screen','question','review','analysis','decision','build_plan')
                    ORDER BY kind,record_key,version DESC""",
                 (assessment_id,),
             ).fetchall()
