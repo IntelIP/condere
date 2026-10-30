@@ -19,6 +19,7 @@ from condere.runtime.judges import (
     jev_citations,
     jev_rubric,
     plan_citations,
+    plan_comparison,
     plan_rubric,
 )
 
@@ -108,3 +109,16 @@ def test_plan_judge_answers_the_rubric_and_quotes_with_strict_json():
     )
     assert plan_citations(judge, CLAIMS) == {"C1_0": 1.0}  # Clamped to [0, 1].
     assert all(item["model"] == "gpt-6-astra" and item["store"] is False for item in sent)
+
+
+def test_pairwise_comparison_cancels_a_judge_that_always_prefers_the_first_file():
+    class Client:
+        class responses:  # noqa: N801 - mirrors the SDK attribute
+            @staticmethod
+            @contextmanager
+            def create(**request):
+                text = json.dumps({"reasoning": "first looks better", "prefer_first": 0.7})
+                yield [SimpleNamespace(type="response.output_text.delta", delta=text)]
+
+    result = plan_comparison(PlanJudge(None, client_factory=Client), "case A", "case B")
+    assert set(result) == set(RUBRIC) and set(result.values()) == {0.5}

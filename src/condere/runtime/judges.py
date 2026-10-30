@@ -13,6 +13,7 @@ spending ledger.
 import json
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
@@ -253,6 +254,41 @@ def agreement(
     return {"gaps": gaps, "mean_gap": round(sum(gaps.values()) / len(gaps), 3) if gaps else None}
 
 
+# What low, middling and high answers look like for each rubric question. A single
+# all-questions call without anchors rated hedged theses 0.87-0.93 where Jev gave 0.14-0.36
+# and Opus 0.45-0.65 (2026-10-30), so Astra scores one question at a time against these.
+ANCHORS = {
+    "thesis_specific": "0.1: no buyer, or 'X could support a business' with demand left open. "
+    "0.5: names a buyer or a paid capability but not both, or no reason to pay now. "
+    "0.9: a specific buyer, the paid capability (not the open code) and the trigger to pay now.",
+    "options_distinct": "0.1: the options differ only in wording or price. 0.5: two share a "
+    "buyer and boundary. 0.9: each differs in route, buyer or open/paid boundary.",
+    "cases_grounded": "0.1: cases assert without claim IDs or cite claims that do not bear on "
+    "them. 0.5: some points rest on cited claims, others on assertion. 0.9: every point for and "
+    "against rests on a listed claim that supports it.",
+    "buyer_evidence_firsthand": "0.1: buyer evidence is vendor pages, marketing or the "
+    "analyst's inference. 0.5: some practitioner accounts, mostly secondary. 0.9: buyers or "
+    "users describe their own pain, workarounds or spending.",
+    "decision_follows": "0.1: the verdict or option contradicts the evidence or ignores a "
+    "failed gate. 0.5: it is plausible but weak spots are not acknowledged. 0.9: it follows "
+    "from the evidence and names the disagreements that remain.",
+    "gaps_acknowledged": "0.1: unknowns are filled with assumptions stated as facts. 0.5: some "
+    "gaps are named, others hidden. 0.9: every material unknown is an unknown claim or open "
+    "question.",
+    "next_test_actionable": "0.1: vague ('validate demand'), no signal or cost. 0.5: a method "
+    "but unclear success or failure, or costly. 0.9: a named, cheap method with clear success "
+    "and failure signals a founder could run this week.",
+    "handoff_actionable": "0.1: a coding agent would have to redo the research or guess what to "
+    "build. 0.5: the next test is clear but the build plan is vague or missing. 0.9: the next "
+    "test and the build plan's work packages could be started directly.",
+}
+PREAMBLE = (
+    "You judge an analysis of how to spin a business off a piece of software. Judge only what "
+    "the case file shows; do not reward length, polish or confident tone. Reason first, citing "
+    "the parts of the case file that decide the question, then score 0 to 1 using the anchors."
+)
+
+
 class PlanJudge:
     """GPT-6 Astra on the owner's ChatGPT plan, answering with a strict JSON schema."""
 
@@ -271,11 +307,11 @@ class PlanJudge:
             )
         )
 
-    def scores(self, prompt: str, names: list[str]) -> dict:
+    def answer(self, prompt: str, properties: dict) -> dict:
         schema = {
             "type": "object",
-            "properties": {name: {"type": "number"} for name in names},
-            "required": names,
+            "properties": properties,
+            "required": list(properties),
             "additionalProperties": False,
         }
         text = ""
@@ -288,7 +324,7 @@ class PlanJudge:
             text={
                 "format": {
                     "type": "json_schema",
-                    "name": "scores",
+                    "name": "judgement",
                     "schema": schema,
                     "strict": True,
                 }
@@ -297,20 +333,77 @@ class PlanJudge:
             for event in stream:
                 if event.type == "response.output_text.delta":
                     text += event.delta
-        answer = json.loads(text)
-        return {name: min(1.0, max(0.0, float(answer[name]))) for name in names}
+        return json.loads(text)
+
+    def scores(self, prompt: str, names: list[str]) -> dict:
+        answer = self.answer(prompt, {name: {"type": "number"} for name in names})
+        return {name: _unit(answer[name]) for name in names}
+
+
+def _unit(value) -> float:
+    return min(1.0, max(0.0, float(value)))
+
+
+def _parallel(calls: dict) -> dict:
+    with ThreadPoolExecutor(max_workers=len(calls) or 1) as pool:
+        futures = {key: pool.submit(call) for key, call in calls.items()}
+        return {key: future.result() for key, future in futures.items()}
 
 
 def plan_rubric(judge: PlanJudge, case: str) -> list[dict]:
-    """The rubric in one request: each answer is the probability the question's answer is yes."""
-    questions = "\n".join(f"- {key}: {question}" for key, question in RUBRIC.items())
-    answers = judge.scores(
-        "You judge an analysis of how to spin a business off a piece of software. Judge only "
-        "what the case file shows. For each question give the probability (0 to 1) that the "
-        f"answer is yes.\n\nQuestions:\n{questions}\n\n<case_file>\n{case}\n</case_file>",
-        list(RUBRIC),
-    )
-    return [{"key": f"astra_{key}", "score": round(answers[key], 3)} for key in RUBRIC]
+    """One question per request, reasoning before an anchored score; requests run in parallel."""
+
+    def ask(key):
+        return lambda: judge.answer(
+            f"{PREAMBLE}\n\nQuestion: {RUBRIC[key]}\nAnchors: {ANCHORS[key]}"
+            f"\n\n<case_file>\n{case}\n</case_file>",
+            {"reasoning": {"type": "string"}, "score": {"type": "number"}},
+        )
+
+    answers = _parallel({key: ask(key) for key in RUBRIC})
+    return [
+        {
+            "key": f"astra_{key}",
+            "score": round(_unit(answers[key]["score"]), 3),
+            "comment": str(answers[key]["reasoning"])[:1_000],
+        }
+        for key in RUBRIC
+    ]
+
+
+def plan_comparison(judge: PlanJudge, case_a: str, case_b: str) -> dict:
+    """For each question, the probability that A answers it better than B.
+
+    Each question is asked with A first and again with B first; the two answers are averaged
+    so the order of presentation cannot decide the comparison. Comparing two runs directly is
+    less sensitive to a judge's overall leniency than absolute scores.
+    """
+    first, second = "first", "second"
+
+    def ask(key, one, two):
+        return lambda: judge.answer(
+            f"{PREAMBLE}\n\nCompare two case files on this question: {RUBRIC[key]}\n"
+            f"Anchors for a single file: {ANCHORS[key]}\n\nGive `prefer_first`, the "
+            "probability that the first file answers the question better (0.5 when they are "
+            f"equal).\n\n<{first}>\n{one}\n</{first}>\n\n<{second}>\n{two}\n</{second}>",
+            {"reasoning": {"type": "string"}, "prefer_first": {"type": "number"}},
+        )
+
+    calls = {(key, "ab"): ask(key, case_a, case_b) for key in RUBRIC}
+    calls |= {(key, "ba"): ask(key, case_b, case_a) for key in RUBRIC}
+    answers = _parallel(calls)
+    return {
+        key: round(
+            (
+                _unit(answers[key, "ab"]["prefer_first"])
+                + 1
+                - _unit(answers[key, "ba"]["prefer_first"])
+            )
+            / 2,
+            3,
+        )
+        for key in RUBRIC
+    }
 
 
 def plan_citations(judge: PlanJudge, claims: list[dict], batch: int = 30) -> dict:
@@ -322,7 +415,8 @@ def plan_citations(judge: PlanJudge, claims: list[dict], batch: int = 30) -> dic
         supported |= judge.scores(
             "For each item, give the probability (0 to 1) that the quoted source text, read on "
             "its own, supports the whole statement, not merely the same topic or one part of "
-            "it.\n\n"
+            "it. 0.1: the quote is on the topic but states none of the claim. 0.5: it states "
+            "part of the claim. 0.9: it states the whole claim.\n\n"
             + "\n\n".join(
                 f"[{name}]\nStatement: {statement}\nQuoted source text: {quote}"
                 for name, statement, quote in chunk
