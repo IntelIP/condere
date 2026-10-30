@@ -451,6 +451,16 @@ class AssessmentStore:
                 (Jsonb(identity), operation_id),
             ).fetchone()
 
+    def mark_uncertain(self, owner: str, assessment_id: str, operation_id: str, detail: str):
+        """Hold one failed dispatch for reconciliation without stopping the assessment."""
+        with self.connection() as connection:
+            self._lock(connection, owner, assessment_id)
+            return connection.execute(
+                """UPDATE operations SET state='uncertain',result=%s,updated_at=now()
+                   WHERE id=%s AND assessment_id=%s AND state='dispatched' RETURNING *""",
+                (Jsonb({"error": detail}), operation_id, assessment_id),
+            ).fetchone()
+
     def finish_operation(
         self,
         owner: str,

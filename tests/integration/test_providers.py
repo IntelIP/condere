@@ -11,6 +11,7 @@ from openai import APITimeoutError, InternalServerError
 from test_evidence import SimulatedObjects
 
 from condere.runtime.evidence import EvidenceError, EvidenceStore
+from condere.runtime.operations import ProviderRefused, ProviderUncertain
 from condere.runtime.providers import (
     CLAUDE_HAIKU,
     CLAUDE_OPUS,
@@ -25,7 +26,7 @@ from condere.runtime.providers import (
     public_query,
     public_url,
 )
-from condere.runtime.state import AssessmentStore, Conflict, RecoveryRequired
+from condere.runtime.state import AssessmentStore
 
 pytestmark = [
     pytest.mark.integration,
@@ -230,15 +231,44 @@ def test_model_failure_keeps_liability_and_never_retries(provider_case, failure)
 
     with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
         model = accounted_model(context, "fake-router-key", http_client=client)
-        with pytest.raises(APITimeoutError if failure == "timeout" else InternalServerError):
+        with pytest.raises(ProviderUncertain) as raised:
             model.invoke("Public alternatives")
-        with pytest.raises((Conflict, RecoveryRequired)):
+        assert isinstance(
+            raised.value.__cause__, APITimeoutError if failure == "timeout" else InternalServerError
+        )
+        with pytest.raises(ProviderUncertain):
             model.invoke("Public alternatives")
     assert len(calls) == 1
     saved = operations(context)[0]
     assert saved["actual_microusd"] is None
     assert saved["state"] == "uncertain"
-    assert context.state.get(context.owner, context.assessment_id)["status"] == "interrupted"
+    assert saved["result"]["error"].startswith(
+        "APITimeoutError" if failure == "timeout" else "Internal"
+    )
+    # Only this call is held for reconciliation; the assessment keeps running.
+    assert context.state.get(context.owner, context.assessment_id)["status"] == "running"
+
+
+def test_model_refusal_is_recorded_at_zero_and_not_bought_again(provider_case):
+    context, _ = provider_case
+    calls = []
+
+    def refuse(request):
+        calls.append(request)
+        return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+
+    with httpx.Client(transport=httpx.MockTransport(refuse)) as client:
+        model = accounted_model(context, "fake-router-key", http_client=client)
+        with pytest.raises(ProviderRefused) as raised:
+            model.invoke("Public alternatives")
+        assert raised.value.status == 402
+        with pytest.raises(ProviderRefused, match="not bought again"):
+            model.invoke("Public alternatives")
+    assert len(calls) == 1
+    saved = operations(context)[0]
+    assert (saved["state"], saved["actual_microusd"]) == ("failed", 0)
+    assert "Insufficient credits" in saved["result"]["detail"]
+    assert context.state.get(context.owner, context.assessment_id)["status"] == "running"
 
 
 def research_response(cost=0.007):
@@ -502,7 +532,7 @@ def test_jev_rejects_answers_to_other_questions(provider_case):
         return httpx.Response(200, json=jev_answer({"other": {}}))
 
     jev = JevDecisions(context, "fake-router-key", transport=httpx.MockTransport(respond))
-    with pytest.raises(ValueError, match="exactly the questions asked"):
+    with pytest.raises(ProviderUncertain, match="exactly the questions asked"):
         jev.ask(["Brief."], {"option": {"type": "choice", "instructions": "Which?"}}, "x")
 
 

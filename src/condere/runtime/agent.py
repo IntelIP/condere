@@ -11,10 +11,17 @@ from deepagents.profiles import (
     HarnessProfile,
     register_harness_profile,
 )
-from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ClearToolUsesEdit,
+    ContextEditingMiddleware,
+    ModelResponse,
+)
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, ToolMessage
 
+from condere.runtime.operations import ProviderRefused, ProviderUncertain
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.spinoff import ClaimBatch
 
@@ -153,6 +160,71 @@ def _context_editing():
     )
 
 
+PROVIDER_FAILURES = (ProviderRefused, ProviderUncertain)
+
+
+class ProviderFailures(AgentMiddleware):
+    """A failed provider call becomes a message the agent can act on, not the end of the run.
+
+    Tools answer with the failure, so the agent can use another route. A subagent whose own
+    model call fails ends its task with a note; the claims it saved stay available to the
+    lead. The lead's model failures still propagate and interrupt the assessment. On
+    2026-10-30 one refused Apify start and one Haiku timeout each ended a 30-minute run.
+    """
+
+    def __init__(self, *, end_task_on_model_failure: bool):
+        super().__init__()
+        self.end_task = end_task_on_model_failure
+
+    @staticmethod
+    def _tool_failure(request, error) -> ToolMessage:
+        return ToolMessage(
+            content=f"{error} Continue with another route or without this result.",
+            tool_call_id=request.tool_call["id"],
+            name=request.tool_call["name"],
+            status="error",
+        )
+
+    @staticmethod
+    def _task_failure(error) -> ModelResponse:
+        return ModelResponse(
+            result=[
+                AIMessage(
+                    content=f"This task stopped because its model call failed: {error} Claims "
+                    "already saved with submit_claims remain available to the lead."
+                )
+            ]
+        )
+
+    def wrap_tool_call(self, request, handler):
+        try:
+            return handler(request)
+        except PROVIDER_FAILURES as error:
+            return self._tool_failure(request, error)
+
+    async def awrap_tool_call(self, request, handler):
+        try:
+            return await handler(request)
+        except PROVIDER_FAILURES as error:
+            return self._tool_failure(request, error)
+
+    def wrap_model_call(self, request, handler):
+        try:
+            return handler(request)
+        except PROVIDER_FAILURES as error:
+            if not self.end_task:
+                raise
+            return self._task_failure(error)
+
+    async def awrap_model_call(self, request, handler):
+        try:
+            return await handler(request)
+        except PROVIDER_FAILURES as error:
+            if not self.end_task:
+                raise
+            return self._task_failure(error)
+
+
 def _isolate(model: BaseChatModel) -> None:
     """Disable the automatic general-purpose subagent for this model identity."""
     identifier, provider = get_model_identifier(model), get_model_provider(model)
@@ -211,7 +283,7 @@ def build_lead_agent(
             "tools": chosen(CODE_ANALYST_TOOLS),
             "skills": ["/workspace/skills/"],
             "response_format": ToolStrategy(ClaimBatch),
-            "middleware": [_context_editing()],
+            "middleware": [ProviderFailures(end_task_on_model_failure=True), _context_editing()],
         },
         {
             "name": "extractor",
@@ -226,7 +298,7 @@ def build_lead_agent(
             "tools": chosen(EXTRACTOR_TOOLS),
             "skills": ["/workspace/skills/"],
             "response_format": ToolStrategy(ClaimBatch),
-            "middleware": [_context_editing()],
+            "middleware": [ProviderFailures(end_task_on_model_failure=True), _context_editing()],
         },
     ]
     instructions = (methods_root / "lead.md").read_text() + (
@@ -242,7 +314,7 @@ def build_lead_agent(
         backend=CompositeBackend(default=sandbox, routes={}, artifacts_root="/workspace"),
         skills=["/workspace/skills/"],
         subagents=subagents,
-        middleware=[_context_editing()],
+        middleware=[ProviderFailures(end_task_on_model_failure=False), _context_editing()],
         checkpointer=checkpointer,
         name="condere-lead",
     )

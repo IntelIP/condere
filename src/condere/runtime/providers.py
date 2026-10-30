@@ -10,6 +10,7 @@ import ipaddress
 import json
 import re
 import threading
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -21,11 +22,12 @@ from langchain_core.messages import message_to_dict, messages_from_dict
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import _construct_lc_result_from_responses_api
+from openai import APIStatusError
 from pydantic import PrivateAttr
 
 from condere.runtime.evidence import EvidenceStore
-from condere.runtime.operations import ProviderResult, execute_once
-from condere.runtime.state import AssessmentStore, Conflict, content_hash
+from condere.runtime.operations import ProviderResult, execute_once, previously_failed, refusal
+from condere.runtime.state import AssessmentStore, content_hash
 
 
 @dataclass(frozen=True)
@@ -252,7 +254,13 @@ class AccountedChatOpenAI(ChatOpenAI):
         def invoke():
             nonlocal called
             called = True
-            response = self.root_client.responses.create(**payload)
+            try:
+                response = self.root_client.responses.create(**payload)
+            except APIStatusError as error:
+                refused = refusal("openrouter", error.status_code, str(error))
+                if refused is None:
+                    raise
+                raise refused from error
             result = _construct_lc_result_from_responses_api(
                 response, output_version="responses/v1"
             )
@@ -295,9 +303,7 @@ class AccountedChatOpenAI(ChatOpenAI):
             invoke=invoke,
         )
         if operation["state"] != "succeeded":
-            raise Conflict(
-                "The saved model operation failed; it will not be repeated automatically."
-            )
+            raise previously_failed("openrouter", operation)
         result = _decode_result(operation["result"])
         output = dict(result.llm_output or {})
         output["condere"] = {
@@ -542,6 +548,11 @@ class ExaResearch:
 
         def invoke():
             with self.client.stream("POST", path, json=body) as response:
+                if response.is_error:
+                    response.read()
+                    refused = refusal("exa", response.status_code, response.text)
+                    if refused:
+                        raise refused
                 response.raise_for_status()
                 raw = bytearray()
                 for chunk in response.iter_bytes():
@@ -577,7 +588,7 @@ class ExaResearch:
             invoke=invoke,
         )
         if operation["state"] != "succeeded":
-            raise Conflict("The saved research operation failed; it will not be purchased again.")
+            raise previously_failed("exa", operation)
         saved = operation["result"]
         data = saved["data"]
         estimate = data.get("costDollars", {}).get("total")
@@ -724,6 +735,10 @@ class JevDecisions:
 
         def invoke():
             response = self.client.post("/systemone", json=body)
+            if response.is_error and (
+                refused := refusal("jev", response.status_code, response.text)
+            ):
+                raise refused
             response.raise_for_status()
             data = response.json()
             answers = data.get("answers")
@@ -757,7 +772,7 @@ class JevDecisions:
             invoke=invoke,
         )
         if operation["state"] != "succeeded":
-            raise Conflict("The saved decision operation failed; it will not be repeated.")
+            raise previously_failed("jev", operation)
         return operation["result"] | {"operation_id": operation["id"]}
 
 
@@ -870,6 +885,25 @@ def _x_source(item: dict) -> dict:
             entry.get("expandedUrl") for entry in urls if isinstance(entry, dict)
         ),
     }
+
+
+def _read_again(request, attempts: int = 3, pause: float = 2.0) -> httpx.Response:
+    """Repeat a read-only request after a transient error; reading a finished run never bills.
+
+    On 2026-10-30 two Apify runs succeeded upstream but their results were lost to a
+    transient HTTP error after the start, which stopped the assessment.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            response = request()
+        except httpx.TransportError:
+            if attempt == attempts:
+                raise
+        else:
+            transient = response.status_code == 429 or response.status_code >= 500
+            if not transient or attempt == attempts:
+                return response.raise_for_status()
+        time.sleep(pause * attempt)
 
 
 def _reddit_source(item: dict) -> dict:
@@ -1046,28 +1080,34 @@ class ApifyResearch:
             response = self.client.post(
                 f"/acts/{actor.name}/runs", params=params | {"waitForFinish": 60}, json=body
             )
+            # A refused start creates no run, so nothing is billed (2026-10-30: two refused
+            # starts stopped a whole assessment and left no error to diagnose).
+            if response.is_error and (
+                refused := refusal("apify", response.status_code, response.text)
+            ):
+                raise refused
             response.raise_for_status()
             run = response.json()["data"]
+            status_path = f"/actor-runs/{run['id']}"
             for _ in range(3):
                 if run["status"] not in {"READY", "RUNNING"}:
                     break
-                waited = self.client.get(f"/actor-runs/{run['id']}", params={"waitForFinish": 60})
-                waited.raise_for_status()
-                run = waited.json()["data"]
+                run = _read_again(
+                    lambda: self.client.get(status_path, params={"waitForFinish": 60})
+                ).json()["data"]
             if run["status"] != "SUCCEEDED":
                 raise ValueError(f"The Apify run ended {run['status']}.")
-            with self.client.stream(
-                "GET",
-                f"/datasets/{run['defaultDatasetId']}/items",
-                params={"clean": "true", "format": "json"},
-            ) as items:
-                items.raise_for_status()
-                raw = bytearray()
-                for chunk in items.iter_bytes():
-                    raw.extend(chunk)
-                    if len(raw) > MAX_RESPONSE_BYTES:
-                        raise ValueError("The provider response exceeded its admitted size.")
-            data = json.loads(raw)
+
+            def items():
+                response = self.client.get(
+                    f"/datasets/{run['defaultDatasetId']}/items",
+                    params={"clean": "true", "format": "json"},
+                )
+                if len(response.content) > MAX_RESPONSE_BYTES:
+                    raise ValueError("The provider response exceeded its admitted size.")
+                return response
+
+            data = json.loads(_read_again(items).content)
             if not isinstance(data, list):
                 raise ValueError("The Actor did not return a dataset item list.")
             usage = run.get("usageTotalUsd")
@@ -1117,7 +1157,7 @@ class ApifyResearch:
     def _save(self, platform, actor, operation, bound) -> dict:
         context = self.context
         if operation["state"] != "succeeded":
-            raise Conflict("The saved research operation failed; it will not be purchased again.")
+            raise previously_failed("apify", operation)
         saved = operation["result"]
         if operation["actual_microusd"] is None:
             context.state.record_pending_cost(

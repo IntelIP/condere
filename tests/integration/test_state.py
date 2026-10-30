@@ -1,5 +1,6 @@
 """Real PostgreSQL transactions with simulated providers; no inference or public research."""
 
+import asyncio
 import multiprocessing
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +14,7 @@ from langgraph.types import Command, interrupt
 from psycopg.conninfo import conninfo_to_dict
 
 from condere.runtime.checkpoints import checkpoint_store
-from condere.runtime.operations import ProviderResult, execute_once
+from condere.runtime.operations import ProviderResult, ProviderUncertain, execute_once
 from condere.runtime.state import (
     AssessmentStore,
     BudgetExceeded,
@@ -365,13 +366,24 @@ def test_provider_wrapper_reuses_saved_results_and_keeps_failure_liability(store
         calls.append("unknown simulated charge")
         raise TimeoutError("simulated response loss")
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(ProviderUncertain):
         execute_once(store, **(options | {"key": "lost-response", "invoke": timeout}))
-    assert store.get(owner, case["id"])["status"] == "interrupted"
+    # Only the lost call is held: it keeps its reservation and is never bought again, while
+    # the assessment continues and cannot be delivered until the call is reconciled.
+    assert store.get(owner, case["id"])["status"] == "running"
     assert store.get(owner, case["id"])["budget"]["pending_microusd"] == 400_000
-    with pytest.raises(Conflict):
+    with pytest.raises(ProviderUncertain):
         execute_once(store, **(options | {"key": "lost-response", "invoke": timeout}))
     assert len(calls) == 2
+    with pytest.raises(RecoveryRequired):
+        store.publish_dossier(owner, case["id"], case["generation"], {"result": "x"}, {})
+
+    def worker_lost():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        execute_once(store, **(options | {"key": "worker-lost", "invoke": worker_lost}))
+    assert store.get(owner, case["id"])["status"] == "interrupted"
 
 
 def test_provider_response_after_cancellation_is_saved_without_restarting_work(store):

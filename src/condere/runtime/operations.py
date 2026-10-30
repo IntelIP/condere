@@ -3,13 +3,45 @@
 The provider adapter must enforce the limits supporting its maximum reservation.
 A reservation alone cannot constrain a provider's actual bill. All provider SDK
 retries must be disabled by the adapter before it enters this wrapper.
+
+A failed call ends only that call. A provider refusal received before any billable work
+(`ProviderRefused`) is recorded as failed at $0. Any other failure may have billed: the
+operation becomes uncertain with its error, keeps its reservation, and must be reconciled
+before the assessment is delivered or continued (`ProviderUncertain`). Both reach the agent
+as a failed tool or task, never as a silent retry. Losing the worker itself (cancellation,
+interpreter exit) still stops the assessment.
 """
 
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from condere.runtime.state import AssessmentStore, Conflict, RecoveryRequired
+from condere.runtime.state import AssessmentStore, Conflict
+
+
+class ProviderRefused(Exception):
+    """The provider answered with a refusal before starting billable work; nothing billed."""
+
+    def __init__(self, provider: str, status: int | None, detail: str):
+        super().__init__(f"{provider} refused the request ({status}): {detail[:300]}")
+        self.provider, self.status, self.detail = provider, status, detail[:1_000]
+
+
+class ProviderUncertain(Exception):
+    """The call failed in a way that may have billed; its reservation awaits reconciliation."""
+
+
+def refusal(provider: str, status: int, detail: str) -> ProviderRefused | None:
+    """A client error (4xx other than a timeout) means the provider did no billable work."""
+    return (
+        ProviderRefused(provider, status, detail) if 400 <= status < 500 and status != 408 else None
+    )
+
+
+def previously_failed(provider: str, operation: dict) -> ProviderRefused:
+    """A saved failure is final: the same request is never bought again."""
+    detail = (operation.get("result") or {}).get("detail") or "earlier attempt failed"
+    return ProviderRefused(provider, None, f"already failed and not bought again: {detail}")
 
 
 @dataclass(frozen=True)
@@ -39,7 +71,7 @@ def execute_once(
     if operation["state"] in {"succeeded", "failed"}:
         return operation
     if operation["state"] != "reserved":
-        raise RecoveryRequired("Existing dispatch has no final result; do not buy it again.")
+        raise ProviderUncertain("This request has no final result yet; it is not bought again.")
     store.dispatch(owner, assessment_id, generation, operation["id"], dispatch_identity)
     try:
         result = invoke()
@@ -56,9 +88,32 @@ def execute_once(
                 "operation_id": operation["id"],
             },
         )
-    except BaseException:
+    except ProviderRefused as refused:
+        store.finish_operation(
+            owner,
+            assessment_id,
+            operation["id"],
+            {"refused": refused.status, "detail": refused.detail},
+            succeeded=False,
+            actual_microusd=0,
+            cost_basis={
+                "basis": "provider refused before starting billable work",
+                "status": refused.status,
+            },
+            reconciliation={"basis": "refusal observed for this dispatch"},
+        )
+        raise
+    except Exception as error:
         # A timeout, invalid response, or interrupted save is not proof of no bill.
         # Keep the dispatch identity and its reservation for explicit reconciliation.
+        detail = f"{type(error).__name__}: {str(error)[:500]}"
+        store.mark_uncertain(owner, assessment_id, operation["id"], detail)
+        raise ProviderUncertain(
+            f"{kind} call failed and may have billed ({detail}); it is held for reconciliation "
+            "and will not be bought again."
+        ) from error
+    except BaseException:
+        # Losing the worker itself (cancellation, exit) stops the assessment as before.
         try:
             store.stop(owner, assessment_id, generation=generation)
         except Conflict:
