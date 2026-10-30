@@ -14,6 +14,7 @@ from smol import ConnectOptions, Machine
 
 from condere.runtime.chatgpt_plan import (
     PLAN_CODE_MODEL,
+    PLAN_EXTRACT_MODEL,
     PlanChatOpenAI,
     PlanCredentials,
     plan_model,
@@ -509,10 +510,17 @@ class AssessmentCoordinator:
                     subagents.append(
                         self._model_factory(ledger)
                         if self._model_factory
-                        # Code analysis runs on GPT-6 Astra with ChatGPT plan usage when the
-                        # owner signed in; Opus on OpenRouter remains the paid alternative.
-                        else plan_model(ledger, self.plan_credentials, model=PLAN_CODE_MODEL)
-                        if subagent == "code-analyst" and self.plan_credentials is not None
+                        # Subagents run on ChatGPT plan usage when the owner signed in (code
+                        # analysis on GPT-6 Astra, extraction on GPT-6.1 Terra); Claude on
+                        # OpenRouter remains the paid alternative.
+                        else plan_model(
+                            ledger,
+                            self.plan_credentials,
+                            model=PLAN_CODE_MODEL
+                            if subagent == "code-analyst"
+                            else PLAN_EXTRACT_MODEL,
+                        )
+                        if self.plan_credentials is not None
                         else accounted_model(ledger, self._router_key, spec=spec)
                     )
             worker_trace = WorkerTrace()

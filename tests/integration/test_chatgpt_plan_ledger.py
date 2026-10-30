@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage
 from test_providers import provider_case as provider_case
 
 from condere.runtime.chatgpt_plan import PLAN_SCOPE, PlanCredentials, PlanUsageStopped, plan_model
+from condere.runtime.operations import ProviderRefused
 
 pytestmark = [
     pytest.mark.integration,
@@ -201,3 +202,34 @@ def test_items_delivered_only_as_stream_events_are_kept(provider_case, tmp_path)
     )
     message = model.invoke([HumanMessage("Read the assessment.")])
     assert [call["name"] for call in message.tool_calls] == ["read_assessment"]
+
+
+def test_a_refused_request_ends_that_call_not_the_assessment(provider_case, tmp_path):
+    context, _ = provider_case
+    incomplete = {
+        "id": "resp_long",
+        "object": "response",
+        "created_at": 0,
+        "model": "gpt-6-astra",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_messages"},
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [],
+    }
+    model = plan_model(
+        context,
+        credentials(tmp_path),
+        model="gpt-6-astra",
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: sse({"type": "response.incomplete", "response": incomplete})
+            )
+        ),
+    )
+    with pytest.raises(ProviderRefused, match="max_messages"):
+        model.invoke([HumanMessage("Read the code.")])
+    [failed] = context.state.operations(context.owner, context.assessment_id)
+    assert failed["state"] == "failed" and failed["result"]["retryable"] is False
+    assert context.state.get(context.owner, context.assessment_id)["status"] == "running"

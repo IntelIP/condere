@@ -6,6 +6,7 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents._models import get_model_identifier, get_model_provider
 from deepagents.backends import CompositeBackend
+from deepagents.middleware.summarization import SummarizationMiddleware
 from deepagents.profiles import (
     GeneralPurposeSubagentProfile,
     HarnessProfile,
@@ -22,7 +23,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 
 from condere.runtime.operations import ProviderRefused, ProviderUncertain
-from condere.runtime.providers import CLAUDE_OPUS
+from condere.runtime.providers import CLAUDE_OPUS, WORKING_CONTEXT_TOKENS
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.spinoff import ClaimBatch
 
@@ -246,15 +247,45 @@ class ProviderFailures(AgentMiddleware):
             return self._task_failure(error)
 
 
-def _isolate(model: BaseChatModel) -> None:
-    """Disable the automatic general-purpose subagent for this model identity."""
+# The ChatGPT plan route ended a GPT-6 Astra code-analyst request with `max_messages` at 76
+# input items (37 tool calls) on 2026-10-30, at ~50k tokens. Context editing shortens old
+# outputs but keeps every item, so subagents also summarise by message count first.
+SUBAGENT_MESSAGE_LIMIT = 56
+
+
+def _identity(model: BaseChatModel) -> str:
     identifier, provider = get_model_identifier(model), get_model_provider(model)
     profile_key = f"{provider}:{identifier}" if provider and identifier else identifier
     if not profile_key or ":" not in profile_key:
         raise ValueError("The worker model needs a resolvable identity for its isolation profile.")
+    return profile_key
+
+
+def _isolate(model: BaseChatModel, *, own_summary: bool = False) -> None:
+    """Disable the automatic general-purpose subagent for this model identity.
+
+    With `own_summary`, the default token-based summarisation is replaced by the subagent's
+    message-capped one (`_subagent_summary`).
+    """
     register_harness_profile(
-        profile_key,
-        HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)),
+        _identity(model),
+        HarnessProfile(
+            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
+            excluded_middleware=frozenset({"SummarizationMiddleware"} if own_summary else ()),
+        ),
+    )
+
+
+def _subagent_summary(model: BaseChatModel, backend) -> SummarizationMiddleware:
+    return SummarizationMiddleware(
+        model=model,
+        backend=backend,
+        trigger=[
+            ("messages", SUBAGENT_MESSAGE_LIMIT),
+            ("tokens", int(WORKING_CONTEXT_TOKENS * 0.85)),
+        ],
+        keep=("messages", 16),
+        trim_tokens_to_summarize=None,
     )
 
 
@@ -276,8 +307,19 @@ def build_lead_agent(
     research; only the lead can submit. Each model is an accounted adapter, so every
     subagent call is recorded in the spending ledger.
     """
-    for item in (model, code_model, extract_model):
-        _isolate(item)
+    _isolate(model)
+    # A subagent sharing the lead's model identity keeps the lead's profile and summarisation.
+    own_summary = {
+        name: _identity(item) != _identity(model)
+        for name, item in (("code-analyst", code_model), ("extractor", extract_model))
+    }
+    for item, name in ((code_model, "code-analyst"), (extract_model, "extractor")):
+        _isolate(item, own_summary=own_summary[name])
+    backend = CompositeBackend(default=sandbox, routes={}, artifacts_root="/workspace")
+
+    def summary(item, name):
+        return [_subagent_summary(item, backend)] if own_summary[name] else []
+
     files = method_files(methods_root, skills)
     for name in ("code-analyst", "extractor"):
         files[f"/workspace/subagents/{name}.md"] = (
@@ -304,7 +346,11 @@ def build_lead_agent(
             "tools": chosen(CODE_ANALYST_TOOLS),
             "skills": ["/workspace/skills/"],
             "response_format": ToolStrategy(ClaimBatch),
-            "middleware": [ProviderFailures(end_task_on_model_failure=True), _context_editing()],
+            "middleware": [
+                ProviderFailures(end_task_on_model_failure=True),
+                *summary(code_model, "code-analyst"),
+                _context_editing(),
+            ],
         },
         {
             "name": "extractor",
@@ -319,7 +365,11 @@ def build_lead_agent(
             "tools": chosen(EXTRACTOR_TOOLS),
             "skills": ["/workspace/skills/"],
             "response_format": ToolStrategy(ClaimBatch),
-            "middleware": [ProviderFailures(end_task_on_model_failure=True), _context_editing()],
+            "middleware": [
+                ProviderFailures(end_task_on_model_failure=True),
+                *summary(extract_model, "extractor"),
+                _context_editing(),
+            ],
         },
     ]
     instructions = (methods_root / "lead.md").read_text() + (
@@ -332,7 +382,7 @@ def build_lead_agent(
         model=model,
         tools=tools,
         system_prompt=instructions,
-        backend=CompositeBackend(default=sandbox, routes={}, artifacts_root="/workspace"),
+        backend=backend,
         skills=["/workspace/skills/"],
         subagents=subagents,
         middleware=[ProviderFailures(end_task_on_model_failure=False), _context_editing()],

@@ -36,7 +36,7 @@ from langchain_openai.chat_models.base import _construct_lc_result_from_response
 from openai import APIError, APIStatusError, OpenAI
 from pydantic import PrivateAttr
 
-from condere.runtime.operations import ProviderResult, execute_once
+from condere.runtime.operations import ProviderRefused, ProviderResult, execute_once
 from condere.runtime.providers import (
     WORKING_CONTEXT_TOKENS,
     ProviderContext,
@@ -63,7 +63,11 @@ PLAN_MODEL = "gpt-6.1-sol"
 # two Opus code analyses cost $11.92 and $12.96 on OpenRouter. Both models answered on the
 # plan route the same day.
 PLAN_CODE_MODEL = "gpt-6-astra"
-PLAN_MODELS = {PLAN_MODEL, PLAN_CODE_MODEL}
+# Extraction moved to the plan too (owner, 2026-10-30), leaving Jev as the only per-call
+# model charge. Terra is OpenAI's fast, efficient tier above Luna; quote fit and firsthand
+# evidence are the weakest judged areas, so the stronger of the two starts.
+PLAN_EXTRACT_MODEL = "gpt-6.1-terra"
+PLAN_MODELS = {PLAN_MODEL, PLAN_CODE_MODEL, PLAN_EXTRACT_MODEL}
 REFRESH_MARGIN_SECONDS = 300
 # Responses fields this route rejects (preview limitations, checked 2026-10-28).
 UNSUPPORTED_FIELDS = {
@@ -641,7 +645,12 @@ class PlanChatOpenAI(ChatOpenAI):
         )
         if operation["state"] != "succeeded":
             failure = operation["result"] or {}
-            raise PlanUsageStopped(failure.get("code", "unknown"), failure.get("detail", ""))
+            code, detail = failure.get("code", "unknown"), failure.get("detail", "")
+            if not retryable(code):
+                # A refusal of this request (e.g. `max_messages`, seen 2026-10-30 when a code
+                # analyst reached 76 items on Astra) ends this call, not the assessment.
+                raise ProviderRefused("chatgpt_plan", None, f"{code}: {detail}")
+            raise PlanUsageStopped(code, detail)
         result = _decode_result(operation["result"])
         output = dict(result.llm_output or {})
         output["condere"] = {
