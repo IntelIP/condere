@@ -226,7 +226,11 @@ def create_server(client: AssessmentClient) -> FastMCP:
     async def read_report(
         assessment_id: str, format: Literal["json", "markdown"] = "json"
     ) -> dict[str, Any]:
-        """Retrieve the full saved dossier: all 26 T/M/B answers, review and handoff."""
+        """Retrieve the compact saved result: decision, reasoning summary and artifact links.
+
+        markdown returns the README. Read linked detail with read_artifact by its ref.
+        Retrieval never starts research.
+        """
         return await client.request(
             "GET", f"/{segment(assessment_id)}/report", params={"format": format}
         )
@@ -238,6 +242,22 @@ def create_server(client: AssessmentClient) -> FastMCP:
         """List saved source identities and provenance; follow next_offset for all sources."""
         return await client.request(
             "GET", f"/{segment(assessment_id)}/sources", params={"offset": offset, "limit": limit}
+        )
+
+    @server.tool(annotations=read)
+    async def read_artifact(
+        assessment_id: str, ref: str, offset: Offset = 0, limit: int = 20_000
+    ) -> dict[str, Any]:
+        """Read a linked artifact (for example artifacts/reasoning.md or artifacts/claims.json).
+
+        Offsets are characters; follow next_offset. The sha256 matches the report's link.
+        """
+        if ref.startswith("/") or ".." in ref.split("/"):
+            raise ValueError("Use the artifact's relative ref from the report.")
+        return await client.request(
+            "GET",
+            f"/{segment(assessment_id)}/artifacts/{ref}",
+            params={"offset": offset, "limit": limit},
         )
 
     @server.tool(annotations=read)

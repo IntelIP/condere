@@ -16,12 +16,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field
 from starlette.background import BackgroundTask
 
+from condere.runtime.bundle import render_readme
 from condere.runtime.calculations import Record
 from condere.runtime.chatgpt_plan import USAGE_URL
-from condere.runtime.contracts import QUESTION_IDS, STAGES, IntakeBrief
+from condere.runtime.contracts import IntakeBrief
 from condere.runtime.dossier import render_markdown
 from condere.runtime.evidence import EvidenceError
 from condere.runtime.service import AssessmentService
+from condere.runtime.spinoff import SpinoffResult
 from condere.runtime.state import NotFound, StateError
 
 PREFIX = "/agents/condere/assessments"
@@ -130,10 +132,9 @@ def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[st
             "execution_mode": service.execution_mode,
             "policy_version": service.policy_version,
             "method_version": service.method_version,
-            "questions": QUESTION_IDS,
-            "stages": STAGES,
-            "analysis_depths": ["adaptive", "deep"],
-            "result_schemas": ["condere.screen.v1", "condere.assessment.v2"],
+            "flow": ["repository_index", "lead", "decision", "build_plan"],
+            "result_schemas": ["condere.spinoff.v1"],
+            "artifacts": "read_artifact by the ref listed in the report's artifacts",
             # Clients show "Using ChatGPT plan" with a Manage usage link when this is set.
             "model_billing": (
                 {"type": "chatgpt_plan", "manage_usage": USAGE_URL}
@@ -193,10 +194,23 @@ def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[st
         assessment_id: str, owner: Owner, format: Literal["json", "markdown"] = "json"
     ):
         saved = await asyncio.to_thread(service.report, owner, assessment_id)
-        return (
-            PlainTextResponse(render_markdown(saved), media_type="text/markdown")
-            if format == "markdown"
-            else saved.model_dump(mode="json")
+        if format == "markdown":
+            text = (
+                render_readme(saved) if isinstance(saved, SpinoffResult) else render_markdown(saved)
+            )
+            return PlainTextResponse(text, media_type="text/markdown")
+        return saved.model_dump(mode="json")
+
+    @app.get(PREFIX + "/{assessment_id}/artifacts/{ref:path}")
+    async def artifact(
+        assessment_id: str,
+        ref: str,
+        owner: Owner,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=20_000, ge=1, le=100_000),
+    ):
+        return await asyncio.to_thread(
+            service.artifact, owner, assessment_id, ref, offset=offset, limit=limit
         )
 
     @app.get(PREFIX + "/{assessment_id}/sources")

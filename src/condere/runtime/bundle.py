@@ -266,3 +266,47 @@ def build_result(
         },
         "artifacts": [link.model_dump() for link in links.values()],
     }
+
+
+def render_readme(result) -> str:
+    """The first thing a person or coding agent reads; every detail is one link away."""
+    decision, plan = result.decision, result.build_plan
+    lines = [
+        "# Condere spin-off assessment",
+        "",
+        f"**Thesis.** {result.reasoning.thesis}",
+        "",
+        f"**Decision.** {decision.verdict.value} (confidence "
+        f"{decision.verdict.confidence if decision.verdict.confidence is not None else 'n/a'}) — "
+        f"option {decision.option.value}, route {decision.route.value}.",
+    ]
+    if decision.contested:
+        lines.append(f"Contested: {', '.join(decision.contested)}.")
+    lines += ["", result.reasoning.summary, "", "## Next test", ""]
+    test = result.next_test
+    lines += [
+        f"- Assumption: {test.assumption}",
+        f"- Method: {test.method}",
+        f"- Success: {test.success}",
+        f"- Failure: {test.failure}",
+        f"- Cost and time: {test.cost_and_time}",
+    ]
+    if plan is not None:
+        lines += ["", f"## Build plan for {plan.option}", ""]
+        lines += [f"- Keep open: {', '.join(plan.keep_open) or 'none named'}"]
+        lines += [f"- Build: {item.capability}" for item in plan.build_paid]
+        lines += [
+            f"- {item.id}: {item.goal} (accept: {item.acceptance})" for item in plan.work_packages
+        ]
+        lines += [f"- Not authorized: {', '.join(plan.not_authorized)}"]
+    if result.open_questions:
+        lines += ["", "## Open questions", ""]
+        lines += [f"- {item.question} ({item.who_can_answer})" for item in result.open_questions]
+    lines += ["", "## Files", ""]
+    lines += [f"- `{link.ref}` — {link.summary}" for link in result.artifacts]
+    lines += [
+        "",
+        "`assessment.json` is the complete structured result. This assessment does not "
+        "authorize building, deploying, publishing, outreach or spending.",
+    ]
+    return "\n".join(lines) + "\n"

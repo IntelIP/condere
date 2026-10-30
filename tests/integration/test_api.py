@@ -1,6 +1,7 @@
 """HTTP contracts with real PostgreSQL, fictional findings, and a gated execution test double."""
 
 import asyncio
+import hashlib
 import io
 import os
 import zipfile
@@ -9,11 +10,11 @@ from uuid import uuid4
 import httpx
 import pytest
 from test_coordinator import native_case as native_case
-from test_service import ready_for_finalization
+from test_coordinator import publish_spinoff
 from test_service import setup_case as setup_case
 
 from condere.interfaces.api import PREFIX, create_app
-from condere.runtime.dossier import render_markdown
+from condere.runtime.bundle import render_readme
 
 pytestmark = [
     pytest.mark.integration,
@@ -71,8 +72,7 @@ async def test_http_saved_results_sources_and_export_never_start_research(setup_
         provenance={"provider": "simulation"},
         limitations=["No real research."],
     )
-    ready_for_finalization(service, owner, case)
-    dossier = service.finalize(owner, case["id"], case["generation"])
+    dossier = publish_spinoff(service, owner, case, source.id)
     coordinator = GateCoordinator(service)
     app = create_app(service, coordinator, owner_tokens={owner: "a" * 40, "other-owner": "b" * 40})
     transport = httpx.ASGITransport(app=app)
@@ -87,19 +87,33 @@ async def test_http_saved_results_sources_and_export_never_start_research(setup_
         ).status_code == 401
         capabilities = (await client.get(PREFIX + "/capabilities")).json()
         assert capabilities["agent_id"] == "condere"
-        assert len(capabilities["questions"]) == 26
+        assert capabilities["result_schemas"] == ["condere.spinoff.v1"]
         listed = (await client.get(PREFIX)).json()
         assert case["id"] in {item["id"] for item in listed["assessments"]}
         assert (await client.get(PREFIX, headers=OTHER)).json()["assessments"] == []
         before_objects = service.evidence.client.calls
-        for suffix in ("", "/report", "/sources", "/export", f"/sources/{source.id}/original"):
+        for suffix in (
+            "",
+            "/report",
+            "/sources",
+            "/export",
+            f"/sources/{source.id}/original",
+            "/artifacts/artifacts/claims.json",
+        ):
             denied = await client.get(PREFIX + "/" + case["id"] + suffix, headers=OTHER)
             assert denied.status_code == 404
         assert service.evidence.client.calls == before_objects
         report = await client.get(f"{PREFIX}/{case['id']}/report")
         assert report.json() == dossier.model_dump(mode="json")
         markdown = await client.get(f"{PREFIX}/{case['id']}/report?format=markdown")
-        assert markdown.text == render_markdown(dossier)
+        assert markdown.text == render_readme(dossier)
+        claims = (
+            await client.get(f"{PREFIX}/{case['id']}/artifacts/artifacts/claims.json?limit=50")
+        ).json()
+        assert claims["sha256"] == dossier.claims.full.sha256
+        assert claims["next_offset"] == 50
+        missing = await client.get(f"{PREFIX}/{case['id']}/artifacts/artifacts/none.md")
+        assert missing.status_code == 404
         sources = (await client.get(f"{PREFIX}/{case['id']}/sources")).json()
         assert sources["sources"][0]["id"] == source.id
         window = (await client.get(f"{PREFIX}/{case['id']}/sources/{source.id}?limit=10")).json()
@@ -112,6 +126,9 @@ async def test_http_saved_results_sources_and_export_never_start_research(setup_
         assert archive.status_code == 200
         with zipfile.ZipFile(io.BytesIO(archive.content)) as package:
             assert original in [package.read(name) for name in package.namelist()]
+            assert package.read("README.md").decode() == render_readme(dossier)
+            for link in dossier.artifacts:
+                assert hashlib.sha256(package.read(link.ref)).hexdigest() == link.sha256
         assert (await client.post(f"{PREFIX}/{case['id']}/continue")).status_code == 202
     assert coordinator.calls == []
     assert service.state.operations(owner, case["id"]) == []
@@ -205,11 +222,11 @@ async def test_http_continuation_reports_uncertain_charges_without_releasing_the
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(
-    reason="Expects the retired 26-question dossier; step 5 publishes the spin-off result."
+@pytest.mark.skipif(
+    os.environ.get("CONDERE_TEST_SANDBOX") != "1", reason="Native VM opt-in required"
 )
-async def test_http_start_to_native_dossier_uses_the_real_coordinator(native_case, monkeypatch):
-    service, owner, case, make, _, calls, _, _ = native_case
+async def test_http_start_to_native_result_uses_the_real_coordinator(native_case, monkeypatch):
+    service, owner, case, make, _, calls, *_ = native_case
     coordinator = make()
     completed = asyncio.Event()
     run = coordinator.run
@@ -243,6 +260,7 @@ async def test_http_start_to_native_dossier_uses_the_real_coordinator(native_cas
         assert {item["status"] for item in status["workers"]} == {"completed"}
         report = (await client.get(f"{PREFIX}/{case['id']}/report")).json()
         assert report == service.report(owner, case["id"]).model_dump(mode="json")
-        assert len(report["findings"]["questions"]) == 26
-        assert len(calls) == 27
+        assert report["schema_version"] == "condere.spinoff.v1"
+        assert report["build_plan"]["option"] == report["decision"]["option"]["value"]
+        assert sorted(role for role, _ in calls) == ["code-analyst", "extractor", "lead", "planner"]
         assert service.state.operations(owner, case["id"]) == []

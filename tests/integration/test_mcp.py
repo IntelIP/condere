@@ -14,15 +14,15 @@ from uuid import uuid4
 
 import pytest
 import uvicorn
+from langsmith.utils import LangSmithNotFoundError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from test_api import GateCoordinator
 from test_coordinator import native_case as native_case
-from test_service import ready_for_finalization
+from test_coordinator import publish_spinoff
 from test_service import setup_case as setup_case
 
 from condere.interfaces.api import create_app
-from condere.runtime.contracts import QUESTION_IDS
 from condere.runtime.state import content_hash
 from condere.runtime.tracing import Tracing
 
@@ -98,22 +98,32 @@ async def test_stdio_retrieves_same_saved_result_and_explicit_writes(setup_case,
         provenance={"provider": "simulation"},
         limitations=["No real research."],
     )
-    ready_for_finalization(service, owner, case)
-    dossier = service.finalize(owner, case["id"], case["generation"])
+    dossier = publish_spinoff(service, owner, case, source.id)
     coordinator = GateCoordinator(service)
     app = create_app(service, coordinator, owner_tokens={owner: "a" * 40, "other-owner": "b" * 40})
     async with serve(app) as origin:
         async with connect(origin, tmp_path / "exports") as session:
             tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-            assert len(tools) == 11
+            assert len(tools) == 12
+            assert tools["read_artifact"].annotations.readOnlyHint
             assert tools["read_report"].annotations.readOnlyHint
             assert not tools["admit_assessment"].annotations.readOnlyHint
             assert not tools["export_assessment"].annotations.readOnlyHint
-            assert len((await call(session, "capabilities"))["questions"]) == 26
+            capabilities = await call(session, "capabilities")
+            assert capabilities["result_schemas"] == ["condere.spinoff.v1"]
             listing = await call(session, "list_assessments")
             assert case["id"] in {item["id"] for item in listing["assessments"]}
             identity = {"assessment_id": case["id"]}
             assert await call(session, "read_report", identity) == dossier.model_dump(mode="json")
+            reasoning = await call(
+                session, "read_artifact", identity | {"ref": "artifacts/reasoning.md"}
+            )
+            assert reasoning["sha256"] == dossier.reasoning.full.sha256
+            assert "Case against" in reasoning["text"]
+            escaped = await session.call_tool(
+                "read_artifact", identity | {"ref": "../dossier/final"}
+            )
+            assert escaped.isError
             assert (await call(session, "assessment_status", identity))["status"] == "completed"
             assert (await call(session, "list_sources", identity))["sources"][0]["id"] == source.id
             evidence = identity | {"source_id": source.id}
@@ -173,7 +183,7 @@ async def test_stdio_retrieves_same_saved_result_and_explicit_writes(setup_case,
     reason="This complete protocol check requires native VMs and native object storage",
 )
 async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tmp_path, request):
-    service, owner, case, make, _, calls, created, _ = native_case
+    service, owner, case, make, _, calls, created, *_ = native_case
     tracing = None
     trace_ids = []
     outage = os.environ.get("CONDERE_TEST_LANGSMITH_OUTAGE") == "1"
@@ -217,42 +227,35 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
         identity = {"assessment_id": case["id"]}
         report = await call(session, "read_report", identity)
         assert report == service.report(owner, case["id"]).model_dump(mode="json")
-        assert len(report["findings"]["questions"]) == 26
+        assert report["schema_version"] == "condere.spinoff.v1"
         sources = await call(session, "list_sources", identity)
         assert sources["total"] == 1
-        source = sources["sources"][0]
+        source = next(
+            item for item in sources["sources"] if item["origin"].endswith("native-fixture")
+        )
         original = await call(session, "read_original", identity | {"source_id": source["id"]})
         body = base64.b64decode(original["data_base64"])
-        assert body == b"Fictional source for the native storage integration check."
+        assert body == b"Operators report upgrades keep breaking in production."
         archive = await call(session, "export_assessment", identity)
         with zipfile.ZipFile(archive["path"]) as package:
             assert body in [package.read(name) for name in package.namelist()]
-            assert "assessment.html" in package.namelist()
-            assert len(report["figures"]) >= 1
-            for asset in report["assets"]:
-                data = package.read(asset["path"])
-                assert hashlib.sha256(data).hexdigest() == asset["sha256"]
-                if asset["media_type"] == "image/png":
-                    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+            assert "README.md" in package.namelist()
+            for link in report["artifacts"]:
+                assert hashlib.sha256(package.read(link["ref"])).hexdigest() == link["sha256"]
             preview = Path(".artifacts/report-preview")
             preview.mkdir(parents=True, exist_ok=True)
             for name in package.namelist():
                 target = preview / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(package.read(name))
-        assert len(calls) == 27 and len(created) == 28
+        assert sorted(role for role, _ in calls) == ["code-analyst", "extractor", "lead", "planner"]
+        assert len(created) == 2
         assert service.state.operations(owner, case["id"]) == []
         failure = None
         if tracing is not None:
             status = await call(session, "assessment_status", identity)
             records = [item["payload"] for item in status["telemetry"]]
-            assert len(records) == 27
-            assert {item["role"] for item in records} == {
-                "technical",
-                "market",
-                "business",
-                "review",
-            }
+            assert {item["role"] for item in records} == {"lead", "planner"}
             for item in records:
                 assert item["execution_mode"] == "simulation"
                 if outage:
@@ -265,41 +268,37 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
                 item["id"]: item["worker_key"] for item in service.state.workers(owner, case["id"])
             }
             technical = next(
-                item["trace_id"] for item in records if keys[item["worker_id"]] == "technical:T1"
+                item["trace_id"] for item in records if keys[item["worker_id"]] == "lead"
             )
             deadline = asyncio.get_running_loop().time() + 60
             roots = []
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.to_thread(tracing.client.flush, 5)
-                roots = await asyncio.to_thread(
-                    lambda: [tracing.client.read_run(trace_id) for trace_id in trace_ids]
-                )
+                try:
+                    roots = await asyncio.to_thread(
+                        lambda: [tracing.client.read_run(trace_id) for trace_id in trace_ids]
+                    )
+                except LangSmithNotFoundError:  # Ingestion lags; poll until the deadline.
+                    await asyncio.sleep(1)
+                    continue
                 runs = await asyncio.to_thread(
                     lambda: list(
                         tracing.client.list_runs(
                             project_name="condere-local",
                             trace_id=technical,
-                            filter='eq(name, "submit_question")',
+                            filter='eq(name, "submit_analysis")',
                         )
                     )
                 )
                 failure = next(
-                    (run for run in runs if "missing" in str(run.error or run.outputs)),
+                    (run for run in runs if "missing" in str(run.error or run.outputs).lower()),
                     None,
                 )
                 if failure is not None:
                     break
                 await asyncio.sleep(1)
-            assert {run.extra["metadata"]["role"] for run in roots} == {
-                "technical",
-                "market",
-                "business",
-                "review",
-            }
+            assert {run.extra["metadata"]["role"] for run in roots} == {"lead", "planner"}
             assert all(run.extra["metadata"]["assessment_id"] == case["id"] for run in roots)
-            assert {run.extra["metadata"]["question_id"] for run in roots} - {None} == set(
-                QUESTION_IDS
-            )
             assert failure is not None and str(failure.trace_id) == technical
         from smol import ConnectOptions, Machine
 

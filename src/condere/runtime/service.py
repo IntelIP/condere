@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from condere.runtime.agent import method_version
-from condere.runtime.bundle import artifact_link, build_result, render_artifacts
+from condere.runtime.bundle import artifact_link, build_result, render_artifacts, render_readme
 from condere.runtime.calculations import calculate
 from condere.runtime.contracts import (
     QUESTION_IDS,
@@ -741,6 +741,25 @@ class AssessmentService:
         }.get(saved["payload"].get("schema_version"), Dossier)
         return model.model_validate(saved["payload"])
 
+    def _export_spinoff(self, owner, assessment_id, result, archive) -> None:
+        """README first, the compact JSON, then every artifact at its linked path."""
+        archive.writestr("README.md", render_readme(result))
+        archive.writestr("assessment.json", result.model_dump_json(indent=2) + "\n")
+        for link in result.artifacts:
+            text = self.artifact(owner, assessment_id, link.ref, limit=100_000)
+            parts = [text["text"]]
+            while text["next_offset"] is not None:
+                text = self.artifact(
+                    owner, assessment_id, link.ref, offset=text["next_offset"], limit=100_000
+                )
+                parts.append(text["text"])
+            archive.writestr(link.ref, "".join(parts))
+        for source in self._source_index(owner, assessment_id):
+            archive.writestr(
+                f"artifacts/sources/{source['id']}.txt",
+                self.evidence.text(owner, assessment_id, source["id"]),
+            )
+
     def export(self, owner: str, assessment_id: str, target: Path) -> Path:
         dossier = self.report(owner, assessment_id)
         created = False
@@ -750,6 +769,9 @@ class AssessmentService:
                 target.chmod(0o600)
                 with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
                     archive = _FixedTimeZip(zipped)
+                    if isinstance(dossier, SpinoffResult):
+                        self._export_spinoff(owner, assessment_id, dossier, archive)
+                        return target
                     archive.writestr("assessment.json", render_json(dossier))
                     archive.writestr("assessment.md", render_markdown(dossier))
                     archive.writestr("assessment.html", render_html(dossier))

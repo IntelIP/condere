@@ -66,7 +66,41 @@ class ScriptedJev:
         return {"model": "typesafe/jev-1.14-20261014", "answers": answers}
 
 
-def analysis_payload(source_id: str) -> dict:
+BUILD_PLAN = {
+    "option": "O1",
+    "keep_open": [],
+    "build_paid": [{"capability": "Managed upgrades", "why": ["C1"]}],
+    "architecture_delta": ["tenancy", "metering"],
+    "work_packages": [{"id": "W1", "goal": "Upgrade runner", "acceptance": "Upgrade test passes"}],
+    "not_authorized": ["deployment", "outreach"],
+}
+
+
+def publish_spinoff(service, owner, case, source_id):
+    """Publish a fictional result through the service contract, without VMs or providers."""
+    from test_service import worker
+
+    from condere.runtime.decision import decide
+
+    generation = case["generation"]
+    lead = worker(service, owner, case, "lead")
+    quote = service.evidence.text(owner, case["id"], source_id)[:20]
+    service.submit_analysis(
+        owner, case["id"], generation, lead["id"], analysis_payload(source_id, quote)
+    )
+    service.finish_worker(owner, case["id"], generation, lead["id"])
+    prompt = service.state.get(owner, case["id"])["brief"]["original_input"]
+    decision, brief = decide(ScriptedJev(), service.analysis(owner, case["id"]), prompt, case["id"])
+    service.record_decision(
+        owner, case["id"], decision, brief, service.analysis_hash(owner, case["id"])
+    )
+    planner = worker(service, owner, case, "planner")
+    service.submit_build_plan(owner, case["id"], generation, planner["id"], BUILD_PLAN)
+    service.finish_worker(owner, case["id"], generation, planner["id"])
+    return service.finalize_spinoff(owner, case["id"], generation)
+
+
+def analysis_payload(source_id: str, quote: str = "upgrades keep breaking") -> dict:
     option = {
         "open_part": "Engine",
         "paid_part": "Operations",
@@ -84,7 +118,7 @@ def analysis_payload(source_id: str) -> dict:
                 "id": "C1",
                 "statement": "Operators report upgrade breakage.",
                 "status": "observed",
-                "citations": [{"source_id": source_id, "quote": "upgrades keep breaking"}],
+                "citations": [{"source_id": source_id, "quote": quote}],
             },
             {"id": "C2", "statement": "Teams would pay per database.", "status": "modelled"},
         ],
@@ -196,16 +230,7 @@ def native_case(tmp_path, monkeypatch, request):
     def factory(context):
         calls.append((context.worker_role, context.generation))
         if context.worker_role == "planner":
-            plan = {
-                "option": "O1",
-                "keep_open": [],
-                "build_paid": [{"capability": "Managed upgrades", "why": ["C1"]}],
-                "architecture_delta": ["tenancy", "metering"],
-                "work_packages": [
-                    {"id": "W1", "goal": "Upgrade runner", "acceptance": "Upgrade test passes"}
-                ],
-                "not_authorized": ["deployment", "outreach"],
-            }
+            plan = BUILD_PLAN
             return RehearsalModel(
                 model_name="condere:planner",
                 responses=[
