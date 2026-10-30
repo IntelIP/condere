@@ -23,12 +23,13 @@ API_NAMES = (
     "CONDERE_ARTIFACT_DIRECTORY",
     "EXA_API_KEY",
     "LANGSMITH_API_KEY",
+    "CONDERE_OPENROUTER_API_KEY",
 )
 # Optional LangSmith destination and endpoint; the server validates the combination.
 API_OPTIONAL = (
     "CONDERE_MODEL_PROVIDER",
     "CONDERE_CHATGPT_HOME",
-    "CONDERE_OPENROUTER_API_KEY",
+    "APIFY_TOKEN",
     "LANGSMITH_PROJECT",
     "LANGSMITH_AGENT_ID",
     "LANGSMITH_AGENT_ENVIRONMENT",

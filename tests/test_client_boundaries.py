@@ -90,9 +90,11 @@ def test_launch_selects_only_component_credentials_and_rejects_unsafe_origins():
         }
         | {"CONDERE_SMOL_IMAGE": "registry.test/condere@sha256:" + "0" * 64}
     )
-    # The ChatGPT plan is the default provider; OpenRouter billing needs its own key.
+    # Claude subagents and Jev need OpenRouter even when the lead uses the ChatGPT plan.
     with pytest.raises(ValueError, match="CONDERE_OPENROUTER_API_KEY"):
-        configuration(complete | {"CONDERE_MODEL_PROVIDER": "openrouter"})
+        configuration(complete)
+    complete |= {"CONDERE_OPENROUTER_API_KEY": "configured"}
+    assert configuration(complete)["CONDERE_MODEL_PROVIDER"] == "chatgpt"
     with pytest.raises(ValueError, match="chatgpt or openrouter"):
         configuration(complete | {"CONDERE_MODEL_PROVIDER": "other"})
     for url in (

@@ -37,10 +37,12 @@ REQUIRED = (
     "CONDERE_ARTIFACT_DIRECTORY",
     "EXA_API_KEY",
     "LANGSMITH_API_KEY",
+    # Claude subagents and the Jev decision run through OpenRouter in every mode.
+    "CONDERE_OPENROUTER_API_KEY",
 )
-# Model billing: CONDERE_MODEL_PROVIDER=chatgpt (default, the operator's ChatGPT plan via
-# Sign in with ChatGPT) or openrouter (requires CONDERE_OPENROUTER_API_KEY).
-PROVIDER = ("CONDERE_MODEL_PROVIDER", "CONDERE_CHATGPT_HOME", "CONDERE_OPENROUTER_API_KEY")
+# Lead and planner billing: CONDERE_MODEL_PROVIDER=chatgpt (default, the operator's ChatGPT
+# plan via Sign in with ChatGPT) or openrouter. APIFY_TOKEN enables X, Reddit and YouTube.
+PROVIDER = ("CONDERE_MODEL_PROVIDER", "CONDERE_CHATGPT_HOME", "APIFY_TOKEN")
 # Trace destination: LANGSMITH_PROJECT, or LANGSMITH_AGENT_ID with LANGSMITH_AGENT_ENVIRONMENT.
 TRACING = (
     "LANGSMITH_PROJECT",
@@ -81,8 +83,6 @@ def configuration(environment) -> dict[str, str]:
     provider = values.setdefault("CONDERE_MODEL_PROVIDER", "chatgpt")
     if provider not in {"chatgpt", "openrouter"}:
         raise ValueError("CONDERE_MODEL_PROVIDER must be chatgpt or openrouter.")
-    if provider == "openrouter" and not values.get("CONDERE_OPENROUTER_API_KEY"):
-        raise ValueError("Missing Condere runtime configuration: CONDERE_OPENROUTER_API_KEY")
     validate_api_url(values["CONDERE_API_URL"])
     if not values["CONDERE_OWNER_ID"].strip():
         raise ValueError("Configure a nonempty owner identity.")
@@ -116,11 +116,10 @@ def build_app():
             application_dsn=values["CONDERE_DATABASE_URL"],
             image=values["CONDERE_SMOL_IMAGE"],
             artifacts=Path(values["CONDERE_ARTIFACT_DIRECTORY"]),
-            openrouter_key=values.get("CONDERE_OPENROUTER_API_KEY")
-            if provider == "openrouter"
-            else None,
+            openrouter_key=values["CONDERE_OPENROUTER_API_KEY"],
             plan_credentials=plan,
             exa_key=values["EXA_API_KEY"],
+            apify_token=values.get("APIFY_TOKEN"),
             tracing=tracing,
         )
         app = create_app(
