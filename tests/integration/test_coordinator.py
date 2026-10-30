@@ -411,25 +411,25 @@ async def test_continuation_after_an_unfinished_lead_reaches_the_decision(native
 async def test_orphaned_dispatch_requires_reconciliation_before_continuation(native_case):
     service, owner, case, make, _, calls, created, _, _ = native_case
     started = service.begin(owner, case["id"])
-    operation = service.state.reserve_operation(
-        owner,
-        case["id"],
-        started["generation"],
-        "unknown-request",
-        "simulation",
-        {"test": True},
-        7000,
-    )
-    service.state.dispatch(
-        owner, case["id"], started["generation"], operation["id"], {"provider": "simulation"}
-    )
+    for key, bound in (("small-request", 7000), ("large-request", 400_000)):
+        operation = service.state.reserve_operation(
+            owner, case["id"], started["generation"], key, "simulation", {"test": key}, bound
+        )
+        service.state.dispatch(
+            owner, case["id"], started["generation"], operation["id"], {"provider": "simulation"}
+        )
     with pytest.raises(RecoveryRequired, match="Reconcile"):
         await make().run(owner, case["id"], resume=True)
     assert calls == created == []
-    saved = service.state.operations(owner, case["id"])[0]
-    assert saved["state"] == "uncertain"
-    assert saved["reserved_microusd"] == 7000
-    assert saved["actual_microusd"] is None
+    saved = {item["operation_key"]: item for item in service.state.operations(owner, case["id"])}
+    # A held call within the $0.25 small-charge rule closes, charged at its reservation;
+    # a larger one still blocks continuation until it is reconciled.
+    assert (saved["small-request"]["state"], saved["small-request"]["actual_microusd"]) == (
+        "failed",
+        7000,
+    )
+    assert saved["large-request"]["state"] == "uncertain"
+    assert saved["large-request"]["actual_microusd"] is None
 
 
 def test_repository_allowance_is_shared_and_atomic(native_case):
