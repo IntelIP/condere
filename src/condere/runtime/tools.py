@@ -30,12 +30,18 @@ from condere.runtime.providers import ApifyResearch, ExaResearch
 from condere.runtime.repositories import canonical_repository, stage_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
-from condere.runtime.spinoff import Analysis
+from condere.runtime.spinoff import Analysis, BuildPlan
 from condere.runtime.state import Conflict, NotFound, content_hash
 
 # Bounded correction: a worker may fix rejected submissions, but not loop indefinitely.
 MAX_REJECTED_SUBMISSIONS = 6
-SUBMISSION_TOOLS = {"submit_screen", "submit_question", "submit_review", "submit_analysis"}
+SUBMISSION_TOOLS = {
+    "submit_screen",
+    "submit_question",
+    "submit_review",
+    "submit_analysis",
+    "submit_build_plan",
+}
 
 
 class CorrectionLimitReached(RuntimeError):
@@ -164,6 +170,8 @@ def worker_tools(
                 if assigned["assignment"]["role"] == "review"
                 else Analysis
                 if assigned["assignment"]["role"] == "lead"
+                else BuildPlan
+                if assigned["assignment"]["role"] == "planner"
                 else QuestionAnswer
             ).model_json_schema(),
             "question_contracts": {
@@ -181,7 +189,17 @@ def worker_tools(
             "accepted": {
                 key: {"content_hash": record["content_hash"], "payload": record["payload"]}
                 for key, record in records.items()
-                if record["kind"] in {"screen", "technical", "question", "review", "calculation"}
+                if record["kind"]
+                in {
+                    "screen",
+                    "technical",
+                    "question",
+                    "review",
+                    "calculation",
+                    "analysis",
+                    "decision",
+                    "build_plan",
+                }
             },
         }
         if assigned["assignment"]["role"] == "review":
@@ -652,6 +670,34 @@ def worker_tools(
         )
 
     @tool
+    def submit_build_plan(
+        payload: BuildPlan | None = None,
+        supersedes_hash: str | None = None,
+        path: str | None = None,
+    ) -> dict:
+        """Submit the build plan for the chosen option as a payload OR a sandbox JSON path."""
+        guard("submit_build_plan")
+        if path is not None:
+            if payload is not None:
+                raise ValueError("Supply exactly one of payload or path.")
+            downloaded = sandbox.download_files([path])[0]
+            if downloaded.error or downloaded.content is None:
+                raise ValueError("Cannot read the build plan JSON from the assigned sandbox.")
+            payload = BuildPlan.model_validate_json(downloaded.content)
+        elif payload is None:
+            raise ValueError("Supply exactly one of payload or path.")
+        return accepted(
+            service.submit_build_plan(
+                owner,
+                assessment_id,
+                generation,
+                worker_id,
+                payload.model_dump(mode="json"),
+                supersedes_hash=supersedes_hash,
+            )
+        )
+
+    @tool
     def submit_review(payload: FinalReview, supersedes_hash: str | None = None) -> dict:
         """Submit final review of the exact accepted hashes, preserving gaps and qualifications."""
         guard("submit_review")
@@ -685,6 +731,7 @@ def worker_tools(
         inspect_repository,
         submit_question,
         submit_analysis,
+        submit_build_plan,
         submit_review,
     ]
     return [item for item in available if item.name in assigned["assignment"]["permitted_tools"]]

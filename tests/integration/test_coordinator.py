@@ -195,6 +195,33 @@ def native_case(tmp_path, monkeypatch, request):
 
     def factory(context):
         calls.append((context.worker_role, context.generation))
+        if context.worker_role == "planner":
+            plan = {
+                "option": "O1",
+                "keep_open": [],
+                "build_paid": [{"capability": "Managed upgrades", "why": ["C1"]}],
+                "architecture_delta": ["tenancy", "metering"],
+                "work_packages": [
+                    {"id": "W1", "goal": "Upgrade runner", "acceptance": "Upgrade test passes"}
+                ],
+                "not_authorized": ["deployment", "outreach"],
+            }
+            return RehearsalModel(
+                model_name="condere:planner",
+                responses=[
+                    AIMessage(
+                        content="",
+                        tool_calls=[{"name": "read_assessment", "args": {}, "id": "read"}],
+                    ),
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "submit_build_plan", "args": {"payload": plan}, "id": "plan"}
+                        ],
+                    ),
+                    AIMessage(content="The fictional plan was submitted."),
+                ],
+            )
         if context.worker_role != "lead":
             return RehearsalModel(model_name=f"condere:{context.worker_role}", responses=[])
         return RehearsalModel(
@@ -269,15 +296,19 @@ async def test_native_lead_run_records_analysis_and_one_decision(native_case):
     assert reasoning["next_offset"] == 200
     assert (await make().run(owner, case["id"])) == result
     assert service.report(owner, case["id"]) == result
-    assert sorted(calls) == [("code-analyst", 1), ("extractor", 1), ("lead", 1)]
+    assert sorted(calls) == [("code-analyst", 1), ("extractor", 1), ("lead", 1), ("planner", 1)]
+    assert result.build_plan.option == "O1" and result.build_plan.work_packages[0].id == "W1"
     assert jev.asked == ["assess option O1", "assess option O2", "choose verdict, option and route"]
-    [worker] = service.state.workers(owner, case["id"])
-    assert worker["assignment"]["role"] == "lead" and worker["status"] == "completed"
+    workers = service.state.workers(owner, case["id"])
+    assert [worker["assignment"]["role"] for worker in workers] == ["lead", "planner"]
+    assert {worker["status"] for worker in workers} == {"completed"}
     rejected = service.state.records(owner, case["id"], kind="rejected_submission")
     assert len(rejected) == 1 and rejected[0]["payload"]["tool"] == "submit_analysis"
-    [export] = service.state.records(owner, case["id"], kind="worker_export")
-    raw = (artifacts / case["id"] / export["record_key"] / "accepted.json").read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == export["payload"]["sha256"]
+    exports = service.state.records(owner, case["id"], kind="worker_export")
+    assert len(exports) == 2
+    for export in exports:
+        raw = (artifacts / case["id"] / export["record_key"] / "accepted.json").read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == export["payload"]["sha256"]
     [brief] = service.state.records(owner, case["id"], kind="decision_brief")
     assert brief["payload"]["sha256"] == result.decision.brief.sha256
     assert service.state.operations(owner, case["id"]) == []

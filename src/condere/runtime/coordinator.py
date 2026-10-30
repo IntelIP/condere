@@ -162,6 +162,7 @@ class AssessmentCoordinator:
             "business": ("question:T", "question:M"),
             "review": ("question:",),
             "lead": (),
+            "planner": ("analysis:", "decision:"),
         }[role]
         return {
             key: record["content_hash"]
@@ -287,7 +288,17 @@ class AssessmentCoordinator:
                                     self.service.finalize_screen, owner, assessment_id, generation
                                 )
                 if plan["stages"] == [list(stage) for stage in LEAD_STAGES]:
-                    await asyncio.to_thread(self._decide, owner, assessment_id, generation)
+                    decided = await asyncio.to_thread(
+                        self._decide, owner, assessment_id, generation
+                    )
+                    chosen = decided["decision"]
+                    if chosen["option"]["value"] != "none" and chosen["verdict"]["value"] != "stop":
+                        async with checkpoint_store(
+                            self.checkpoint_dsn, application_dsn=self.application_dsn
+                        ) as checkpointer:
+                            await self._run_unit(
+                                owner, assessment_id, generation, "planner", plan, checkpointer
+                            )
                     return await asyncio.to_thread(
                         self.service.finalize_spinoff, owner, assessment_id, generation
                     )

@@ -153,6 +153,13 @@ async def run_worker(
                 checkpointer=checkpointer,
             )
         else:
+            if role == "planner":
+                assignment = json.dumps(assigned["assignment"], sort_keys=True) + (
+                    "\nStart with read_assessment for the brief, the accepted analysis and the "
+                    "decision, and the exact BuildPlan schema. You may use the sandbox tools "
+                    "inside /workspace and the saved repository index. Submit with "
+                    "submit_build_plan; a final message alone does not complete this assignment."
+                )
             agent = await asyncio.to_thread(
                 build_agent,
                 model,
@@ -161,6 +168,7 @@ async def run_worker(
                 skills=assigned["assignment"]["skills"],
                 tools=tools,
                 checkpointer=checkpointer,
+                instructions_file="planner.md" if role == "planner" else "instructions.md",
             )
         config = {
             "configurable": {"thread_id": assigned["thread_id"]},

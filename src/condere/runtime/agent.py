@@ -82,6 +82,7 @@ def build_agent(
     tools=(),
     checkpointer=None,
     methods_root: Path = METHODS_ROOT,
+    instructions_file: str = "instructions.md",
 ):
     """The application creates separate workers/VMs; nested shared-VM delegation is disabled."""
     identifier, provider = get_model_identifier(model), get_model_provider(model)
@@ -96,7 +97,7 @@ def build_agent(
     transferred = sandbox.upload_files(list(method_files(methods_root, skills).items()))
     if any(item.error for item in transferred):
         raise RuntimeError("Could not load all required Condere methods into the assigned sandbox.")
-    instructions = (methods_root / "instructions.md").read_text()
+    instructions = (methods_root / instructions_file).read_text()
     instructions += (
         "\n\nYour trusted assignment:\n"
         + assignment

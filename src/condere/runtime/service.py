@@ -85,7 +85,13 @@ RESEARCH_TOOLS = {
     "review": [],
 }
 RESEARCH_TOOLS["lead"] = list(RESEARCH_TOOLS["technical"])
-SUBMIT_TOOL = {"screen": "submit_screen", "review": "submit_review", "lead": "submit_analysis"}
+RESEARCH_TOOLS["planner"] = ["inspect_repository"]
+SUBMIT_TOOL = {
+    "screen": "submit_screen",
+    "review": "submit_review",
+    "lead": "submit_analysis",
+    "planner": "submit_build_plan",
+}
 SHARED_SKILLS = ["opportunity-framing"]
 ROLE_SKILLS = {
     "screen": ["repository-index", "code-exploration"],
@@ -102,6 +108,7 @@ ROLE_SKILLS = {
         "code-exploration",
         "evidence-reconciliation",
     ],
+    "planner": ["build-plan", "repository-index", "code-exploration"],
 }
 
 
@@ -113,6 +120,8 @@ def output_keys(assignment: dict) -> list[str]:
         return ["review:final"]
     if assignment["role"] == "lead":
         return ["analysis:main"]
+    if assignment["role"] == "planner":
+        return ["build_plan:main"]
     return ["question:" + identity for identity in assignment["question_ids"]]
 
 
@@ -212,7 +221,7 @@ class AssessmentService:
     ) -> dict:
         """One worker per question (or the screen/review); its skills and tools are narrow."""
         self._compatible(self.state.get(owner, assessment_id))
-        if role not in {"screen", "review", "lead", *STAGES}:
+        if role not in {"screen", "review", "lead", "planner", *STAGES}:
             raise ValueError("Unknown private worker role.")
         if (role in STAGES) != (question_id is not None) or (
             question_id is not None and question_id not in STAGES[role]
@@ -222,8 +231,8 @@ class AssessmentService:
             list(QUESTION_IDS) if role == "review" else [question_id] if question_id else []
         )
         skills = (
-            ROLE_SKILLS["lead"]
-            if role == "lead"
+            ROLE_SKILLS[role]
+            if role in {"lead", "planner"}
             else SHARED_SKILLS
             + (QUESTIONS[question_id]["skills"] if question_id else ROLE_SKILLS[role])
         )
@@ -308,6 +317,32 @@ class AssessmentService:
             "analysis",
             "main",
             analysis.model_dump(mode="json"),
+            supersedes_hash=supersedes_hash,
+            generation=generation,
+            worker_id=worker_id,
+        )
+
+    def submit_build_plan(
+        self, owner, assessment_id, generation, worker_id, payload, *, supersedes_hash=None
+    ) -> dict:
+        """Accept a plan only for the decision's chosen option and the analysed components."""
+        self._worker(owner, assessment_id, generation, worker_id, "planner")
+        plan = BuildPlan.model_validate(payload)
+        saved = self.decision(owner, assessment_id)
+        if saved is None:
+            raise Conflict("A build plan follows the decision.")
+        chosen = saved["decision"]["option"]["value"]
+        if plan.option != chosen:
+            raise ValueError(f"The build plan must target the chosen option {chosen}.")
+        components = {item.id for item in self.analysis(owner, assessment_id).asset.components}
+        if unknown := sorted(set(plan.keep_open) - components):
+            raise ValueError(f"keep_open names components not in the analysis: {unknown}.")
+        return self.state.append_record(
+            owner,
+            assessment_id,
+            "build_plan",
+            "main",
+            plan.model_dump(mode="json"),
             supersedes_hash=supersedes_hash,
             generation=generation,
             worker_id=worker_id,
@@ -623,6 +658,8 @@ class AssessmentService:
         brief = heads["decision_brief:main"]["payload"]["text"]
         plan = heads.get("build_plan:main")
         build_plan = BuildPlan.model_validate(plan["payload"]) if plan else None
+        if build_plan is not None and build_plan.option != decision.option.value:
+            build_plan = None  # A plan for an earlier decision's option is not delivered.
         sources = self._source_index(owner, assessment_id)
         links = {}
         for ref, (text, media_type, summary) in render_artifacts(
@@ -650,7 +687,7 @@ class AssessmentService:
         expected = {
             key: heads[key]["content_hash"]
             for key in ("analysis:main", "decision:main", "build_plan:main")
-            if key in heads
+            if key in heads and (key != "build_plan:main" or build_plan is not None)
         }
         self.state.publish_dossier(
             owner, assessment_id, generation, result.model_dump(mode="json"), expected

@@ -613,6 +613,7 @@ class AssessmentStore:
                     )
                     or (assignment["role"] == "review" and (kind, key) == ("review", "final"))
                     or (assignment["role"] == "lead" and (kind, key) == ("analysis", "main"))
+                    or (assignment["role"] == "planner" and (kind, key) == ("build_plan", "main"))
                 )
                 if not allowed:
                     raise Conflict("The submission is outside this worker's assignment.")
