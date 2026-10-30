@@ -20,6 +20,11 @@ margin per outcome after model, tooling and review costs. The open part, if any,
 tooling or method; the paid part is the delivered outcome. `services_only` is a
 people-delivered service.
 
+At least one option should be inventive rather than the default open-core split: a
+different buyer, an AI-native service, a combination with another capability, or a
+business the capability makes newly possible. Inventive does not mean unsupported:
+it rests on evidenced claims, and its assumptions are written as such.
+
 For each option state the open part, the paid part, the buyer, why they pay,
 the main risk, and the case for and against, each backed by claim IDs.
 

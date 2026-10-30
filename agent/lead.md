@@ -42,6 +42,14 @@ One `Analysis`, submitted with `submit_analysis`. Its exact schema is in
   (`agent`, `founder`, `customer`, `counsel`). Answer the `agent` ones yourself
   before submitting if you can.
 
+The analysis is a box: claims, quotes and evidence follow the rules below without
+exception. Options and the product are where you create. Go beyond the obvious split
+of open code and paid hosting: a buyer outside the capability's current market, an
+AI-native service that sells the outcome, a combination of this capability with
+another, a data or workflow business the capability makes possible. Each invention
+rests on evidenced claims and states its own assumptions as `modelled` or `assumed`;
+the next test is how it earns belief.
+
 Write the case for and against each option before any decision exists. Be
 balanced: the decision model reads exactly what you write. Each `case_against`
 names the claim (by ID) that most threatens the option, or the unknown that

@@ -34,6 +34,10 @@ RUBRIC = {
     "buyer_evidence_firsthand": "Does the buyer evidence come from the people who would buy or "
     "use the product (practitioners, users, buyers, their spending), rather than from vendors, "
     "marketing or the analyst's own inference?",
+    "options_inventive": "Does at least one option go beyond the obvious open-code and "
+    "paid-hosting split (a new buyer, an AI-native service that sells the outcome, a new "
+    "combination or business the capability makes possible) while still resting on the "
+    "evidence?",
     "decision_follows": "Do the verdict and chosen option follow from the evidence in the case, "
     "with real disagreements or weak spots acknowledged rather than hidden?",
     "gaps_acknowledged": "Are material unknowns stated as unknowns or open questions, rather "
@@ -269,6 +273,10 @@ ANCHORS = {
     "buyer_evidence_firsthand": "0.1: buyer evidence is vendor pages, marketing or the "
     "analyst's inference. 0.5: some practitioner accounts, mostly secondary. 0.9: buyers or "
     "users describe their own pain, workarounds or spending.",
+    "options_inventive": "0.1: every option is open code plus paid hosting or support for "
+    "the obvious buyer. 0.5: one option varies the buyer or packaging. 0.9: at least one "
+    "option is a genuinely new business (new buyer, AI-native service, new combination) "
+    "grounded in the evidence.",
     "decision_follows": "0.1: the verdict or option contradicts the evidence or ignores a "
     "failed gate. 0.5: it is plausible but weak spots are not acknowledged. 0.9: it follows "
     "from the evidence and names the disagreements that remain.",
