@@ -238,6 +238,9 @@ def test_code_analysis_may_use_astra_and_no_other_model(home):
     assert payload["model"] == "gpt-6-astra"
     with pytest.raises(ValueError, match="not a selected plan-route model"):
         plan_model(context, credentials, model="gpt-4o")
+    forced = model.bind_tools([read_assessment], tool_choice="required")
+    payload = forced.bound._get_request_payload([HumanMessage("Read.")], **forced.kwargs)
+    assert payload["tool_choice"] == "auto"  # Forcing made the model loop in reasoning.
 
 
 def test_model_requires_sign_in(home):

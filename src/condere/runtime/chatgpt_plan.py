@@ -468,6 +468,12 @@ class PlanChatOpenAI(ChatOpenAI):
         if payload.get("model") not in PLAN_MODELS:
             raise ValueError("The plan route uses only the selected Condere models.")
         payload |= {"store": False, "stream": True}
+        # A forced tool call (`required`, sent for a subagent's structured output) made Terra
+        # and Astra emit ~100 reasoning items and no output until the plan route ended the
+        # response with `max_messages` (replayed 2026-10-30). The model still ends with the
+        # structured-output tool when it is free to choose, as Claude did with `auto`.
+        if payload.get("tool_choice") not in (None, "auto"):
+            payload["tool_choice"] = "auto"
         functions = []
         for tool in payload.pop("tools", []):
             if tool.get("type") != "function":
