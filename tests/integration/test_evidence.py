@@ -8,14 +8,9 @@ from uuid import uuid4
 import pytest
 from botocore.exceptions import ClientError
 
-from condere.runtime.contracts import (
-    QUESTION_IDS,
-    QUESTIONS,
-    AssessmentFindings,
-    Citation,
-)
+from condere.runtime.contracts import Citation
 from condere.runtime.evidence import EvidenceError, EvidenceStore
-from condere.runtime.state import AssessmentStore, Conflict, NotFound
+from condere.runtime.state import AssessmentStore, NotFound
 
 pytestmark = [
     pytest.mark.integration,
@@ -131,70 +126,6 @@ def test_failed_object_write_does_not_publish_a_source_record(evidence_case):
     evidence.client.fail_at = None
     source = save(evidence, owner, case)
     assert evidence.text(owner, case, source.id).startswith("  Fixture")
-
-
-def full_fixture(measured: dict):
-    """All 26 answers; T5 carries the measured claim under test."""
-
-    def answer(key):
-        missing = key == "B3" or "modelled" not in QUESTIONS[key]["allowed_bases"]
-        return dict(
-            question_id=key,
-            conclusion="Fictional hypothesis.",
-            availability="unavailable" if missing else "available",
-            basis=None if missing else "modelled",
-            assumptions=[] if missing else ["Simulation, not business evidence."],
-            limitations=["No live research."],
-            details={
-                field: None if missing else "Fictional proposed detail."
-                for field in QUESTIONS[key]["required_fields"]
-            },
-            next_action="Human review only.",
-        )
-
-    return AssessmentFindings.model_validate(
-        dict(questions=[answer(key) | (measured if key == "T5" else {}) for key in QUESTION_IDS])
-    )
-
-
-def test_measurements_require_an_immutable_receipt_bound_to_the_saved_source(evidence_case):
-    evidence, owner, case = evidence_case
-    source = evidence.save_source(
-        owner,
-        case,
-        kind="measurement",
-        origin="fixture://measurement",
-        original=b"Simulated p95: 1.2 seconds.",
-        text="Simulated p95: 1.2 seconds.",
-        media_type="text/plain",
-        provenance={"receipt_id": "fixture-receipt"},
-        limitations=["Simulated measurement, not a benchmark."],
-    )
-    citation = evidence.passage(owner, case, source.id)["citation"]
-    findings = full_fixture(
-        dict(basis="measured", assumptions=[], source_ids=[source.id], citations=[citation])
-    )
-    with pytest.raises(EvidenceError, match="source-bound receipt"):
-        evidence.verify_findings(owner, case, findings)
-    receipt = dict(source_id=source.id, original_sha256=source.original_sha256)
-    accepted = evidence.state.append_record(
-        owner, case, "measurement_receipt", "fixture-receipt", receipt
-    )
-    evidence.verify_findings(owner, case, findings)
-    with pytest.raises(Conflict, match="cannot be revised"):
-        evidence.state.append_record(
-            owner,
-            case,
-            "measurement_receipt",
-            "fixture-receipt",
-            receipt | {"original_sha256": "0" * 64},
-            supersedes_hash=accepted["content_hash"],
-        )
-    evidence.client.objects[(evidence.bucket, evidence._key(case, source.original_sha256))] = (
-        b"Changed after acceptance"
-    )
-    with pytest.raises(EvidenceError, match="content hash"):
-        evidence.verify_findings(owner, case, findings)
 
 
 def test_citations_resolve_from_source_and_exact_quote(evidence_case):

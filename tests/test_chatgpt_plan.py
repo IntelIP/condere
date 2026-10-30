@@ -209,7 +209,7 @@ def read_assessment() -> dict:
 
 def test_requests_follow_the_plan_route_contract(home):
     credentials = saved(home, token_endpoint([]), expires_at=4_000_000_000)
-    context = ProviderContext(None, "owner", "case", 1, "technical", "T1")
+    context = ProviderContext(None, "owner", "case", 1, "lead")
     model = plan_model(context, credentials).bind_tools([read_assessment])
     payload = model.bound._get_request_payload(
         [SystemMessage("Condere instructions"), HumanMessage("Begin.")],
@@ -230,6 +230,6 @@ def test_requests_follow_the_plan_route_contract(home):
 
 
 def test_model_requires_sign_in(home):
-    context = ProviderContext(None, "owner", "case", 1, "technical", "T1")
+    context = ProviderContext(None, "owner", "case", 1, "lead")
     with pytest.raises(SignInRequired):
         plan_model(context, PlanCredentials(home))

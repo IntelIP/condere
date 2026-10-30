@@ -267,7 +267,7 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
             keys = {
                 item["id"]: item["worker_key"] for item in service.state.workers(owner, case["id"])
             }
-            technical = next(
+            lead_trace = next(
                 item["trace_id"] for item in records if keys[item["worker_id"]] == "lead"
             )
             deadline = asyncio.get_running_loop().time() + 60
@@ -285,7 +285,7 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
                     lambda: list(
                         tracing.client.list_runs(
                             project_name="condere-local",
-                            trace_id=technical,
+                            trace_id=lead_trace,
                             filter='eq(name, "submit_analysis")',
                         )
                     )
@@ -299,7 +299,7 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
                 await asyncio.sleep(1)
             assert {run.extra["metadata"]["role"] for run in roots} == {"lead", "planner"}
             assert all(run.extra["metadata"]["assessment_id"] == case["id"] for run in roots)
-            assert failure is not None and str(failure.trace_id) == technical
+            assert failure is not None and str(failure.trace_id) == lead_trace
         from smol import ConnectOptions, Machine
 
         remaining = {machine.id for machine in Machine.list(ConnectOptions(target="local"))}

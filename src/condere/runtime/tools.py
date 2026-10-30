@@ -17,13 +17,7 @@ from pydantic import ValidationError
 
 from condere.runtime.calculations import Calculation
 from condere.runtime.calculations import calculate as evaluate_calculation
-from condere.runtime.contracts import (
-    QUESTIONS,
-    OpportunityScreen,
-    QuestionAnswer,
-    RepositoryInspection,
-)
-from condere.runtime.dossier import FinalReview
+from condere.runtime.contracts import RepositoryInspection
 from condere.runtime.evidence import EvidenceError, SourceDocument
 from condere.runtime.indexing import pinned_snapshot
 from condere.runtime.providers import ApifyResearch, ExaResearch
@@ -35,13 +29,7 @@ from condere.runtime.state import Conflict, NotFound, content_hash
 
 # Bounded correction: a worker may fix rejected submissions, but not loop indefinitely.
 MAX_REJECTED_SUBMISSIONS = 6
-SUBMISSION_TOOLS = {
-    "submit_screen",
-    "submit_question",
-    "submit_review",
-    "submit_analysis",
-    "submit_build_plan",
-}
+SUBMISSION_TOOLS = {"submit_analysis", "submit_build_plan"}
 
 
 class CorrectionLimitReached(RuntimeError):
@@ -154,31 +142,17 @@ def worker_tools(
 
     @tool
     def read_assessment() -> dict:
-        """Read the original brief, assignment, accepted findings, and current spending state."""
+        """Read the original brief, assignment, accepted results, and current spending state."""
         guard("read_assessment")
         case = state.get(owner, assessment_id)
         records = service._heads(state.records(owner, assessment_id))
+        role = assigned["assignment"]["role"]
         result = {
             "assessment_id": assessment_id,
             "brief": case["brief"],
             "assignment": assigned["assignment"],
             "budget": case["budget"],
-            "submission_schema": (
-                OpportunityScreen
-                if assigned["assignment"]["role"] == "screen"
-                else FinalReview
-                if assigned["assignment"]["role"] == "review"
-                else Analysis
-                if assigned["assignment"]["role"] == "lead"
-                else BuildPlan
-                if assigned["assignment"]["role"] == "planner"
-                else QuestionAnswer
-            ).model_json_schema(),
-            "question_contracts": {
-                identity: QUESTIONS[identity]
-                for identity in assigned["assignment"]["question_ids"]
-                if assigned["assignment"]["role"] != "review"
-            },
+            "submission_schema": {"lead": Analysis, "planner": BuildPlan}[role].model_json_schema(),
             "repository_indexes": [
                 {
                     key: item["payload"][key]
@@ -189,22 +163,10 @@ def worker_tools(
             "accepted": {
                 key: {"content_hash": record["content_hash"], "payload": record["payload"]}
                 for key, record in records.items()
-                if record["kind"]
-                in {
-                    "screen",
-                    "technical",
-                    "question",
-                    "review",
-                    "calculation",
-                    "analysis",
-                    "decision",
-                    "build_plan",
-                }
+                if record["kind"] in {"calculation", "analysis", "decision", "build_plan"}
             },
         }
-        if assigned["assignment"]["role"] == "review":
-            result["review_context"] = service.review_context(owner, assessment_id)
-        if assigned["assignment"]["role"] == "lead":
+        if role == "lead":
             result["candidate_claims"] = service.candidate_claims(owner, assessment_id)
         return result
 
@@ -576,70 +538,6 @@ def worker_tools(
         return {key: record[key] for key in ("record_key", "version", "content_hash")}
 
     @tool
-    def submit_screen(
-        payload: OpportunityScreen | None = None,
-        supersedes_hash: str | None = None,
-        path: str | None = None,
-    ) -> dict:
-        """Save qualification and executable next checks as a payload OR sandbox JSON file.
-
-        This does not claim the full assessment is complete. A deepen recommendation
-        proceeds automatically through the existing research stages.
-        """
-        guard("submit_screen")
-        if path is not None:
-            if payload is not None:
-                raise ValueError("Supply exactly one of payload or path.")
-            downloaded = sandbox.download_files([path])[0]
-            if downloaded.error or downloaded.content is None:
-                raise ValueError("Cannot read screening JSON from the assigned sandbox.")
-            payload = OpportunityScreen.model_validate_json(downloaded.content)
-        elif payload is None:
-            raise ValueError("Supply exactly one of payload or path.")
-        return accepted(
-            service.submit_screen(
-                owner,
-                assessment_id,
-                generation,
-                worker_id,
-                payload.model_dump(mode="json"),
-                supersedes_hash=supersedes_hash,
-            )
-        )
-
-    @tool
-    def submit_question(
-        payload: QuestionAnswer | None = None,
-        supersedes_hash: str | None = None,
-        path: str | None = None,
-    ) -> dict:
-        """Submit your assigned question's answer as a payload OR a sandbox JSON file path.
-
-        Cite with source_id and the exact quoted text; the application fills in hashes
-        and offsets. Identify the prior hash when revising an accepted answer.
-        """
-        guard("submit_question")
-        if path is not None:
-            if payload is not None:
-                raise ValueError("Supply exactly one of payload or path.")
-            downloaded = sandbox.download_files([path])[0]
-            if downloaded.error or downloaded.content is None:
-                raise ValueError("Cannot read the answer JSON from the assigned sandbox.")
-            payload = QuestionAnswer.model_validate_json(downloaded.content)
-        elif payload is None:
-            raise ValueError("Supply exactly one of payload or path.")
-        return accepted(
-            service.submit_question(
-                owner,
-                assessment_id,
-                generation,
-                worker_id,
-                payload.model_dump(mode="json"),
-                supersedes_hash=supersedes_hash,
-            )
-        )
-
-    @tool
     def submit_claims(
         claims: list[ExtractedClaim],
         origin: Literal["lead", "code-analyst", "extractor"] = "lead",
@@ -720,25 +618,9 @@ def worker_tools(
             )
         )
 
-    @tool
-    def submit_review(payload: FinalReview, supersedes_hash: str | None = None) -> dict:
-        """Submit final review of the exact accepted hashes, preserving gaps and qualifications."""
-        guard("submit_review")
-        return accepted(
-            service.submit_review(
-                owner,
-                assessment_id,
-                generation,
-                worker_id,
-                payload.model_dump(mode="json"),
-                supersedes_hash=supersedes_hash,
-            )
-        )
-
     available = [
         read_assessment,
         search_saved_sources,
-        submit_screen,
         list_sources,
         read_source,
         read_original,
@@ -752,10 +634,8 @@ def worker_tools(
         reddit_research,
         youtube_transcripts,
         inspect_repository,
-        submit_question,
         submit_claims,
         submit_analysis,
         submit_build_plan,
-        submit_review,
     ]
     return [item for item in available if item.name in assigned["assignment"]["permitted_tools"]]

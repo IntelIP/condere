@@ -1,14 +1,12 @@
-"""Real offline analysis and plotting with explicitly fictional inputs."""
+"""Real offline analysis with explicitly fictional inputs."""
 
 import json
 import os
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from condere.runtime.agent import method_files
-from condere.runtime.contracts import QUESTION_IDS
 from condere.runtime.sandbox import SmolSandbox
 
 pytestmark = [
@@ -19,7 +17,7 @@ pytestmark = [
 ]
 
 
-def test_graph_navigation_cache_and_coverage_visuals(tmp_path):
+def test_graph_navigation_and_cache(tmp_path):
     sandbox = SmolSandbox.create(
         "condere-toolkit-" + uuid4().hex[:16], os.environ["CONDERE_SMOL_IMAGE"], tmp_path
     )
@@ -42,46 +40,6 @@ def test_graph_navigation_cache_and_coverage_visuals(tmp_path):
         assert json.loads(sandbox.execute(command).output)["reused"]
         rejected = sandbox.execute(command.replace("--scope src", "--scope ../"))
         assert rejected.exit_code != 0
-
-        payload = {
-            "execution_mode": "simulation",
-            "review": {
-                "items": [
-                    dict(
-                        target=key,
-                        status="qualified" if key.startswith("T") else "supported",
-                        reviewed_hash="a" * 64,
-                        qualifications=["Fictional input"],
-                    )
-                    for key in QUESTION_IDS
-                ],
-                "handoff": {"next_validation_tasks": ["Check the fictional example."]},
-            },
-            "findings": {"questions": []},
-        }
-        assert (
-            sandbox.upload_files([("/workspace/plot-input.json", json.dumps(payload).encode())])[
-                0
-            ].error
-            is None
-        )
-        response = sandbox.execute(
-            "python /workspace/skills/visual-reporting/scripts/render.py "
-            "/workspace/plot-input.json /workspace/figures"
-        )
-        assert response.exit_code == 0, response.output
-        manifest = json.loads(response.output)
-        assert [figure["id"] for figure in manifest["figures"]] == [
-            "evidence-coverage",
-            "validation-plan",
-        ]
-        coverage = sandbox.download_files(["/workspace/" + manifest["figures"][0]["paths"]["png"]])[
-            0
-        ]
-        assert coverage.content.startswith(b"\x89PNG\r\n\x1a\n")
-        preview = Path(".artifacts/report-preview")
-        preview.mkdir(parents=True, exist_ok=True)
-        (preview / "fictional-coverage.png").write_bytes(coverage.content)
     finally:
         sandbox.close(delete=True)
 

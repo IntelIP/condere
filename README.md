@@ -58,4 +58,7 @@ saved sources; traces go to LangSmith.
   cited source texts.
 
 `codex/condere-spinoff` builds on `codex/condere-mda`. The earlier 26-question
-pipeline is preserved at commit `e26d4b59`; its code is retired from new plans.
+pipeline (question workers, screen, final review, HTML dossier) was retired from
+this branch on 2026-10-30. It is preserved at commit `e26d4b59` on
+`codex/condere-mda`, and its saved dossiers stay readable through that branch's
+API, not this one.

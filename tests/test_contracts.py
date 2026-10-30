@@ -1,4 +1,4 @@
-"""Fictional contracts validate coverage and arithmetic, never market research quality."""
+"""Fictional contracts validate intake, citations and arithmetic, never research quality."""
 
 from decimal import Decimal
 
@@ -6,36 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from condere.runtime.calculations import Calculation, CalculationInput, calculate
-from condere.runtime.contracts import (
-    QUESTION_IDS,
-    QUESTIONS,
-    STAGES,
-    AssessmentFindings,
-    Citation,
-    Finding,
-    IntakeBrief,
-    QuestionAnswer,
-)
-
-
-def test_citations_supply_optional_source_ids_without_accepting_an_explicit_mismatch():
-    payload = {
-        "conclusion": "Fictional citation normalization check.",
-        "availability": "available",
-        "basis": "source_observed",
-        "citations": [
-            {
-                "source_id": "b" * 64,
-                "text_sha256": "a" * 64,
-                "start": 0,
-                "end": 5,
-                "quote": "hello",
-            }
-        ],
-    }
-    assert Finding.model_validate(payload).source_ids == ["b" * 64]
-    with pytest.raises(ValidationError, match="Listed without a citation"):
-        Finding.model_validate(payload | {"source_ids": []})
+from condere.runtime.contracts import Citation, IntakeBrief
 
 
 def assumed(name, value, unit):
@@ -62,28 +33,6 @@ def economics(scenario="base"):
     )
 
 
-def answer(question_id, *, unavailable=False):
-    unavailable = unavailable or "modelled" not in QUESTIONS[question_id]["allowed_bases"]
-    return QuestionAnswer(
-        question_id=question_id,
-        conclusion="Fictional hypothesis for contract checks only.",
-        availability="unavailable" if unavailable else "available",
-        basis=None if unavailable else "modelled",
-        details={
-            key: None if unavailable else "Explicitly hypothetical fixture detail."
-            for key in QUESTIONS[question_id]["required_fields"]
-        },
-        assumptions=[]
-        if unavailable
-        else ["No real customers, demand, or measurements are represented."],
-        limitations=["This fixture has no live research."],
-        calculations=[economics(scenario) for scenario in ("low", "base", "high")]
-        if question_id == "B3" and not unavailable
-        else [],
-        next_action="Human review of missing evidence; do not contact or build.",
-    )
-
-
 @pytest.mark.parametrize(
     "brief",
     [
@@ -104,44 +53,6 @@ def test_intake_preserves_intent_without_requiring_customer_assumptions(brief):
         IntakeBrief.model_validate(brief | {"budget_usd": 100})
     with pytest.raises(ValidationError):
         IntakeBrief.model_validate(brief | {"owner_id": "someone-else"})
-
-
-def test_technical_questions_cover_the_open_core_hosting_thesis():
-    assert STAGES["technical"] == tuple(f"T{index}" for index in range(1, 10))
-    assert [QUESTIONS[key]["stage"] for key in QUESTION_IDS[:9]] == ["technical"] * 9
-    assert {"hosting_value"} <= set(QUESTIONS["T5"]["required_fields"])
-    assert {"hosting_rights"} <= set(QUESTIONS["T6"]["required_fields"])
-    assert {"open_core_boundary"} <= set(QUESTIONS["T9"]["required_fields"])
-    for key in STAGES["technical"]:
-        assert QUESTIONS[key]["skills"][1:] == ["repository-index", "code-exploration"]
-    # Architecture and applications can be proposed for an idea with no repository.
-    assert (
-        not QUESTIONS["T1"]["allow_unavailable"] and "modelled" in QUESTIONS["T1"]["allowed_bases"]
-    )
-    assert "modelled" not in QUESTIONS["T2"]["allowed_bases"]
-
-
-def test_full_coverage_preserves_allowed_unknowns_and_rejects_missing_questions():
-    answers = [answer(question_id, unavailable=question_id == "M3") for question_id in QUESTION_IDS]
-    findings = AssessmentFindings(questions=answers)
-    assert len(findings.questions) == 26
-    assert findings.questions[QUESTION_IDS.index("M3")].availability == "unavailable"
-    with pytest.raises(ValidationError):
-        AssessmentFindings(questions=answers[:-1])
-    with pytest.raises(ValidationError, match="once, in order"):
-        AssessmentFindings(questions=answers[:-1] + [answers[0]])
-    with pytest.raises(ValidationError, match="does not permit"):
-        answer("M1", unavailable=True)
-    with pytest.raises(ValidationError, match="does not permit"):
-        answer("T1", unavailable=True)
-    broken = answer("M6").model_dump()
-    del broken["details"]["billing_conditions"]
-    with pytest.raises(ValidationError, match=r"Missing: \[.billing_conditions.\]"):
-        QuestionAnswer.model_validate(broken)
-    incomplete = answer("B3").model_dump()
-    incomplete["calculations"] = incomplete["calculations"][:1]
-    with pytest.raises(ValidationError, match="low/base/high"):
-        QuestionAnswer.model_validate(incomplete)
 
 
 def test_calculations_preserve_units_dates_assumptions_and_unknown_costs():

@@ -170,7 +170,7 @@ def test_concurrent_reservations_share_campaign_cap_and_dispatch_once(store):
 def test_interruption_preserves_evidence_and_requires_reconciliation_before_explicit_resume(store):
     owner, case = running(store)
     original = store.append_record(
-        owner, case["id"], "question", "M1", {"status": "limited", "sources": ["sha256:original"]}
+        owner, case["id"], "analysis", "main", {"status": "limited", "sources": ["sha256:original"]}
     )
     pending = reserve(store, owner, case)
     unused = reserve(store, owner, case, "not-dispatched", 300_000)
@@ -178,8 +178,8 @@ def test_interruption_preserves_evidence_and_requires_reconciliation_before_expl
         owner,
         case["id"],
         case["generation"],
-        "market",
-        {"question_ids": ["M1"], "output": "/workspace/results/market.json"},
+        "lead",
+        {"role": "lead", "output": "/workspace/results/lead.json"},
     )
     store.attach_machine(
         owner, case["id"], case["generation"], worker["id"], "simulated-machine-id"
@@ -219,12 +219,12 @@ def test_interruption_preserves_evidence_and_requires_reconciliation_before_expl
         reserve(reopened, owner, case, "stale-worker", 1)
     assert reserve(reopened, owner, resumed, "not-dispatched", 300_000)["id"] == unused["id"]
     with pytest.raises(Conflict, match="latest accepted"):
-        reopened.append_record(owner, case["id"], "question", "M1", {"status": "qualified"})
+        reopened.append_record(owner, case["id"], "analysis", "main", {"status": "qualified"})
     revised = reopened.append_record(
         owner,
         case["id"],
-        "question",
-        "M1",
+        "analysis",
+        "main",
         {"status": "qualified"},
         supersedes_hash=original["content_hash"],
     )
@@ -414,8 +414,8 @@ async def test_separate_checkpoint_database_resumes_saved_graph(store):
         owner,
         case["id"],
         case["generation"],
-        "review",
-        {"output": "/workspace/results/review.json"},
+        "planner",
+        {"role": "planner", "output": "/workspace/results/planner.json"},
     )
     app_dsn, checkpoint_dsn = (
         os.environ["CONDERE_DATABASE_URL"],

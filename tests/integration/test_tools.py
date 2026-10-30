@@ -10,10 +10,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from test_providers import research_response
-from test_service import accept_findings, question, worker
 from test_service import setup_case as setup_case
+from test_service import worker
 
-from condere.runtime.contracts import QuestionAnswer
 from condere.runtime.providers import ExaResearch, ProviderContext
 from condere.runtime.repositories import RepositorySnapshot
 from condere.runtime.state import Conflict
@@ -51,18 +50,16 @@ def tool_case(setup_case, tmp_path, monkeypatch):
         requests.append(json.loads(request.content))
         return httpx.Response(200, json=research_response())
 
-    def build(role, question_id=None):
-        assigned = worker(service, owner, case, role, question_id)
+    def build(role):
+        assigned = worker(service, owner, case, role)
         sandbox = SimpleNamespace(id=assigned["machine_id"])
-        research = None
-        if role != "review":
-            research = ExaResearch(
-                ProviderContext(service.state, owner, case["id"], case["generation"], role),
-                service.evidence,
-                "fake-exa-key",
-                transport=httpx.MockTransport(respond),
-            )
-            clients.append(research)
+        research = ExaResearch(
+            ProviderContext(service.state, owner, case["id"], case["generation"], role),
+            service.evidence,
+            "fake-exa-key",
+            transport=httpx.MockTransport(respond),
+        )
+        clients.append(research)
         tools = worker_tools(
             service,
             owner=owner,
@@ -82,13 +79,15 @@ def tool_case(setup_case, tmp_path, monkeypatch):
 
 
 def test_research_to_citation_and_assigned_submission(tool_case):
+    from test_coordinator import analysis_payload
+
     service, owner, case, build, requests = tool_case
-    tools, _, _ = build("market", "M1")
-    assert "submit_question" in tools
-    assert not {"submit_review", "inspect_repository"} & tools.keys()
+    tools, _, _ = build("lead")
+    assert {"submit_analysis", "submit_claims", "inspect_repository"} <= tools.keys()
+    assert "submit_build_plan" not in tools
     context = tools["read_assessment"].invoke({})
-    assert context["submission_schema"]["title"] == "QuestionAnswer"
-    assert list(context["question_contracts"]) == ["M1"]
+    assert context["submission_schema"]["title"] == "Analysis"
+    assert context["candidate_claims"] == []
     assert context["brief"]["original_input"].startswith("  Assess")
     request = {"query": "public technology alternatives", "material_gap": "Missing comparator"}
     found = tools["search_public"].invoke(request)
@@ -100,16 +99,15 @@ def test_research_to_citation_and_assigned_submission(tool_case):
     window = tools["read_source"].invoke({"source_id": source_id})
     original = tools["read_original"].invoke({"source_id": source_id})
     assert json.loads(base64.b64decode(original["content"]))["requestId"] == "exa-simulation"
-    payload = question("M1") | {"source_ids": [source_id], "citations": [window["citation"]]}
-    forged = payload | {"citations": [window["citation"] | {"quote": "Invented quotation"}]}
-    assert isinstance(tools["submit_question"].invoke({"payload": forged}), str)
-    accepted = tools["submit_question"].invoke({"payload": payload})
-    assert tools["submit_question"].invoke({"payload": payload}) == accepted
+    quote = window["citation"]["quote"][:20]
+    payload = analysis_payload(source_id, quote)
+    forged = analysis_payload(source_id, "Invented quotation")
+    assert isinstance(tools["submit_analysis"].invoke({"payload": forged}), str)
+    accepted = tools["submit_analysis"].invoke({"payload": payload})
+    assert tools["submit_analysis"].invoke({"payload": payload}) == accepted
     assert accepted["version"] == 1
-    assert "outside" in tools["submit_question"].invoke({"payload": question("B1")})
-    assert service.state.records(owner, case["id"], kind="question")[0]["payload"] == (
-        QuestionAnswer.model_validate(payload).model_dump(mode="json")
-    )
+    cited = service.analysis(owner, case["id"]).claim("C1").citations[0]
+    assert cited.source_id == source_id and cited.quote == quote and cited.text_sha256
     calls = service.evidence.client.calls
     service.state.stop(owner, case["id"], generation=case["generation"])
     for name, args in (("read_source", {"source_id": source_id}), ("search_public", request)):
@@ -119,17 +117,15 @@ def test_research_to_citation_and_assigned_submission(tool_case):
     assert len(requests) == 1
 
 
-def test_reviewer_reads_full_saved_evidence_without_research_tools(tool_case):
+def test_planner_reads_full_saved_evidence_without_research_tools(tool_case):
     service, owner, case, build, requests = tool_case
-    accept_findings(service, owner, case)
-    tools, _, _ = build("review")
+    tools, _, _ = build("planner")
     assert (
-        not {"search_public", "fetch_public_source", "inspect_repository", "submit_question"}
+        not {"search_public", "fetch_public_source", "submit_claims", "submit_analysis"}
         & tools.keys()
     )
     context = tools["read_assessment"].invoke({})
-    assert context["submission_schema"]["title"] == "FinalReview"
-    assert len(context["review_context"]["reviewed_hashes"]) == 26
+    assert context["submission_schema"]["title"] == "BuildPlan"
     raw = "Long fictional evidence. " * 1500
     source = service.evidence.save_source(
         owner,
@@ -149,12 +145,12 @@ def test_reviewer_reads_full_saved_evidence_without_research_tools(tool_case):
         offset = result["next_offset"]
     assert text == raw
     assert requests == []
-    assert "Field required" in tools["submit_review"].invoke({"payload": {}})
+    assert "Field required" in tools["submit_build_plan"].invoke({"payload": {}})
 
 
 def test_calculation_preserves_decimals_unknowns_and_receipt_requirements(tool_case):
     service, owner, case, build, _ = tool_case
-    tools, _, _ = build("business", "B3")
+    tools, _, _ = build("lead")
     calculation = {
         "id": "fictional-cost",
         "scenario": "single",
@@ -201,7 +197,7 @@ def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
     tool_case, tmp_path, monkeypatch
 ):
     service, owner, case, build, _ = tool_case
-    tools, _, sandbox = build("technical", "T2")
+    tools, _, sandbox = build("lead")
     content = b"Fictional repository README."
     archive = tmp_path / "simulated.tar.gz"
     archive.write_bytes(b"Simulated archive; this is not a native repository test.")
@@ -275,7 +271,7 @@ def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
 
 def test_fetch_public_url_admits_only_brief_saved_or_linked_pages(tool_case):
     service, owner, case, build, requests = tool_case
-    tools, _, _ = build("market", "M1")
+    tools, _, _ = build("lead")
     tools["search_public"].invoke(
         {"query": "public technology alternatives", "material_gap": "Missing comparator"}
     )

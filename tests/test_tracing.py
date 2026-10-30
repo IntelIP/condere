@@ -63,19 +63,19 @@ def test_worker_runs_share_one_trace_with_assessment_metadata(sent):
     tracing = Tracing.from_environment(configured(LANGSMITH_PROJECT="condere-dev"), release="v7")
     model = GenericFakeChatModel(messages=iter([AIMessage("done")]))
     with tracing.worker(
-        "condere.technical",
-        inputs={"question_id": "T2", "brief": {"original_input": "Assess sqlite-vec"}},
-        metadata={"assessment_id": "case-1", "role": "technical"},
-        tags=["condere", "technical"],
+        "condere.lead",
+        inputs={"brief": {"original_input": "Assess sqlite-vec"}},
+        metadata={"assessment_id": "case-1", "role": "lead"},
+        tags=["condere", "lead"],
     ) as handle:
         model.invoke("inspect")
-        handle.outputs({"question:T2": {"conclusion": "Embedded extension."}})
+        handle.outputs({"analysis:main": {"thesis": "Embedded extension."}})
     tracing.close()
     payload = b"".join(sent)
     trace_id = handle.trace_id
     assert trace_id and payload.count(trace_id.encode()) >= 2
     assert b"Assess sqlite-vec" in payload and b"Embedded extension." in payload
-    assert b"condere.technical" in payload and b"GenericFakeChatModel" in payload
+    assert b"condere.lead" in payload and b"GenericFakeChatModel" in payload
     compact = payload.replace(b" ", b"")
     assert b'"assessment_id":"case-1"' in compact and b'"method_version":"v7"' in compact
 
@@ -87,7 +87,7 @@ def test_work_continues_when_tracing_cannot_start(monkeypatch, sent):
     monkeypatch.setattr(tracing_module, "trace", unavailable)
     tracing = Tracing.from_environment(configured(LANGSMITH_PROJECT="condere-dev"), release="v1")
     finished = False
-    with tracing.worker("condere.market", inputs={}, metadata={}, tags=[]) as handle:
+    with tracing.worker("condere.lead", inputs={}, metadata={}, tags=[]) as handle:
         handle.outputs({"ignored": True})
         finished = True
     assert finished and handle.trace_id is None
@@ -107,28 +107,3 @@ def test_status_distinguishes_pending_from_unavailable(monkeypatch, sent):
 
     monkeypatch.setattr(type(tracing.client), "read_run", broken)
     assert tracing.status("trace") == ("unavailable", "ConnectionError")
-
-
-def test_accepted_answers_become_candidate_examples_linked_to_their_trace(sent, monkeypatch):
-    tracing = Tracing.from_environment(
-        configured(LANGSMITH_PROJECT="condere-dev", LANGSMITH_DATASET="condere-candidates"),
-        release="v9",
-    )
-    with tracing.worker(
-        "condere.technical",
-        inputs={"question_id": "T5"},
-        metadata={"question_id": "T5"},
-        tags=[],
-    ) as handle:
-        handle.outputs({"question:T5": {"conclusion": "Backups are the burden."}})
-    tracing.close()
-    calls = []
-    monkeypatch.setattr(
-        type(tracing.client), "create_example", lambda client, **kwargs: calls.append(kwargs)
-    )
-    tracing.record_example(handle, {"question:T5": {"conclusion": "Backups are the burden."}})
-    [example] = calls
-    assert example["dataset_name"] == "condere-candidates"
-    assert example["inputs"] == {"question_id": "T5"}
-    assert example["source_run_id"] == handle.run.id
-    assert example["metadata"]["method_version"] == "v9"

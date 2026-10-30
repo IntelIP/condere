@@ -141,7 +141,6 @@ class ProviderContext:
     assessment_id: str
     generation: int
     worker_role: str
-    question_id: str | None = None
 
 
 def _encode_result(result: ChatResult) -> dict:

@@ -14,7 +14,6 @@ from smol import ConnectOptions, Machine
 
 from condere.runtime.chatgpt_plan import PlanChatOpenAI, PlanCredentials, plan_model
 from condere.runtime.checkpoints import checkpoint_store
-from condere.runtime.contracts import BUSINESS_IDS, MARKET_IDS, QUESTIONS, TECHNICAL_IDS
 from condere.runtime.decision import decide
 from condere.runtime.indexing import (
     build_index,
@@ -41,18 +40,6 @@ from condere.runtime.state import Conflict
 from condere.runtime.tracing import Tracing, WorkerTrace
 from condere.runtime.workers import run_worker
 
-# The spin-off flow: one lead (with its own subagents), then the decision step.
-LEAD_STAGES = (("lead",),)
-# Retained 26-question stages; no new plan selects them (see the spin-off goal).
-STAGE_ROLES = {"technical", "market", "business"}
-STAGES = (
-    tuple("technical:" + identity for identity in TECHNICAL_IDS if identity != "T9"),
-    ("technical:T9",),
-    tuple("market:" + identity for identity in MARKET_IDS),
-    tuple("business:" + identity for identity in BUSINESS_IDS),
-    ("review",),
-)
-
 
 class AssessmentCoordinator:
     def __init__(
@@ -71,7 +58,6 @@ class AssessmentCoordinator:
         decision_factory=None,
         callbacks: list | None = None,
         tracing: Tracing | None = None,
-        concurrency: int = 3,
     ):
         if service.execution_mode == "live" and (
             not (openrouter_key or plan_credentials) or not exa_key or model_factory
@@ -97,9 +83,6 @@ class AssessmentCoordinator:
         self.plan_credentials = plan_credentials
         self._model_factory, self.callbacks = model_factory, callbacks or []
         self.tracing = tracing
-        if concurrency < 1:
-            raise ValueError("Run at least one worker at a time.")
-        self.concurrency = concurrency
         self._tasks: dict[tuple[str, str], asyncio.Task] = {}
 
     @staticmethod
@@ -123,27 +106,25 @@ class AssessmentCoordinator:
             }
         )
         plan = {
-            "stages": [list(stage) for stage in LEAD_STAGES],
             "repository_candidates": candidates,
             "private_terms": list(private_terms or ()),
         }
         self.state.append_record(owner, assessment_id, "execution_plan", "main", plan)
         return plan
 
-    def _completed_unit(self, owner, assessment_id, unit):
-        # A completed review is reused only while every reviewed answer is unchanged (input
-        # hashes below), like any other unit; finalization verifies the hashes again.
+    def _completed_unit(self, owner, assessment_id, role):
+        # A completed worker is reused only while its accepted outputs and inputs are unchanged.
         heads = self.service._heads(self.state.records(owner, assessment_id))
         exports = {
             item["record_key"]: item["payload"]
             for item in self.state.records(owner, assessment_id, kind="worker_export")
         }
         for worker in reversed(self.state.workers(owner, assessment_id)):
-            if worker["worker_key"] != unit or worker["status"] != "completed":
+            if worker["worker_key"] != role or worker["status"] != "completed":
                 continue
             accepted = (worker["completion"] or {}).get("accepted_hashes", {})
             exported = exports.get(worker["id"])
-            if exported is None or exported.get("input_hashes") != self._input_hashes(heads, unit):
+            if exported is None or exported.get("input_hashes") != self._input_hashes(heads, role):
                 continue
             if accepted and all(
                 heads.get(key, {}).get("content_hash") == value for key, value in accepted.items()
@@ -152,23 +133,17 @@ class AssessmentCoordinator:
         return None
 
     @staticmethod
-    def _input_hashes(heads, unit):
-        """Accepted records a unit builds on; a changed input invalidates its saved result."""
-        role, _, question = unit.partition(":")
-        prefixes = {
-            "screen": (),
-            "technical": ("question:T",) if question == "T9" else (),
-            "market": ("question:T",),
-            "business": ("question:T", "question:M"),
-            "review": ("question:",),
-            "lead": (),
-            "planner": ("analysis:", "decision:"),
-        }[role]
+    def _input_hashes(heads, role):
+        """Accepted records a worker builds on; a changed input invalidates its saved result.
+
+        The lead starts from the brief alone; the planner builds on the analysis and decision.
+        """
+        if role == "lead":
+            return {}
         return {
             key: record["content_hash"]
             for key, record in heads.items()
-            if (role not in {"screen", "lead"} and key == "screen:main")
-            or (key.startswith(prefixes) and key != "question:" + question)
+            if key.startswith(("analysis:", "decision:"))
         }
 
     async def _stop_machines(self, owner, assessment_id):
@@ -176,10 +151,10 @@ class AssessmentCoordinator:
         names = {worker["machine_id"] or self.machine_name(worker): worker for worker in workers}
         machines = await asyncio.to_thread(Machine.list, ConnectOptions(target="local"))
         for machine in machines:
-            report_machine = re.fullmatch(
-                rf"condere-(report|index)-{re.escape(assessment_id)}-[0-9]+", machine.id
+            index_machine = re.fullmatch(
+                rf"condere-index-{re.escape(assessment_id)}-[0-9]+", machine.id
             )
-            if (machine.id not in names and not report_machine) or machine.state in {
+            if (machine.id not in names and not index_machine) or machine.state in {
                 "stopped",
                 "exited",
             }:
@@ -258,79 +233,26 @@ class AssessmentCoordinator:
             self._tasks[(owner, assessment_id)] = asyncio.current_task()
             try:
                 await self._index(owner, assessment_id, generation, plan)
-                slots = asyncio.Semaphore(self.concurrency)
-
-                async def bounded(unit, checkpointer):
-                    async with slots:
-                        return await self._run_unit(
-                            owner, assessment_id, generation, unit, plan, checkpointer
-                        )
-
                 async with checkpoint_store(
                     self.checkpoint_dsn, application_dsn=self.application_dsn
                 ) as checkpointer:
-                    for stage in plan["stages"]:
-                        # Let siblings finish when one unit fails: cancelling them mid-call
-                        # strands their dispatches and discards their progress.
-                        outcomes = await asyncio.gather(
-                            *(bounded(unit, checkpointer) for unit in stage),
-                            return_exceptions=True,
+                    await self._run_unit(
+                        owner, assessment_id, generation, "lead", plan, checkpointer
+                    )
+                decided = await asyncio.to_thread(self._decide, owner, assessment_id, generation)
+                chosen = decided["decision"]
+                if chosen["option"]["value"] != "none" and chosen["verdict"]["value"] != "stop":
+                    async with checkpoint_store(
+                        self.checkpoint_dsn, application_dsn=self.application_dsn
+                    ) as checkpointer:
+                        await self._run_unit(
+                            owner, assessment_id, generation, "planner", plan, checkpointer
                         )
-                        failures = [item for item in outcomes if isinstance(item, BaseException)]
-                        if failures:
-                            raise BaseExceptionGroup("Assessment stage did not complete.", failures)
-                        if stage == ["screen"]:
-                            screen = await asyncio.to_thread(
-                                self.service.screening, owner, assessment_id
-                            )
-                            if screen.recommendation != "deepen":
-                                return await asyncio.to_thread(
-                                    self.service.finalize_screen, owner, assessment_id, generation
-                                )
-                if plan["stages"] == [list(stage) for stage in LEAD_STAGES]:
-                    decided = await asyncio.to_thread(
-                        self._decide, owner, assessment_id, generation
-                    )
-                    chosen = decided["decision"]
-                    if chosen["option"]["value"] != "none" and chosen["verdict"]["value"] != "stop":
-                        async with checkpoint_store(
-                            self.checkpoint_dsn, application_dsn=self.application_dsn
-                        ) as checkpointer:
-                            await self._run_unit(
-                                owner, assessment_id, generation, "planner", plan, checkpointer
-                            )
-                    result = await asyncio.to_thread(
-                        self.service.finalize_spinoff, owner, assessment_id, generation
-                    )
-                    await asyncio.to_thread(self._trace_funnel, owner, assessment_id, generation)
-                    return result
-                creation = asyncio.create_task(
-                    asyncio.to_thread(
-                        SmolSandbox.create,
-                        f"condere-report-{assessment_id}-{generation}",
-                        self.image,
-                        self.artifacts / assessment_id / f"report-{generation}",
-                    )
+                result = await asyncio.to_thread(
+                    self.service.finalize_spinoff, owner, assessment_id, generation
                 )
-                try:
-                    report_sandbox = await asyncio.shield(creation)
-                except asyncio.CancelledError:
-                    report_sandbox = await creation
-                    await asyncio.to_thread(report_sandbox.close)
-                    raise
-                rendered = False
-                try:
-                    dossier = await asyncio.to_thread(
-                        self.service.finalize,
-                        owner,
-                        assessment_id,
-                        generation,
-                        sandbox=report_sandbox,
-                    )
-                    rendered = True
-                    return dossier
-                finally:
-                    await asyncio.to_thread(report_sandbox.close, delete=rendered)
+                await asyncio.to_thread(self._trace_funnel, owner, assessment_id, generation)
+                return result
             except BaseException:
                 try:
                     await asyncio.to_thread(
@@ -418,13 +340,10 @@ class AssessmentCoordinator:
         if self.tracing is None:
             return contextlib.nullcontext(WorkerTrace())
         assignment = worker["assignment"]
-        question = assignment["question_ids"][0] if assignment["role"] in STAGE_ROLES else None
         return self.tracing.worker(
             "condere." + assignment["role"],
             inputs={
                 "brief": brief,
-                "question_id": question,
-                "question": QUESTIONS[question]["question"] if question else None,
                 "repositories": [
                     {"repository": item["repository"], "commit": item["commit"]} for item in indexes
                 ],
@@ -434,11 +353,10 @@ class AssessmentCoordinator:
                 "worker_id": worker["id"],
                 "generation": generation,
                 "role": assignment["role"],
-                "question_id": question,
                 "skills": assignment["skills"],
                 "execution_mode": self.service.execution_mode,
             },
-            tags=["condere", assignment["role"], question or assignment["role"]],
+            tags=["condere", assignment["role"]],
         )
 
     async def _index(self, owner, assessment_id, generation, plan):
@@ -504,23 +422,17 @@ class AssessmentCoordinator:
         finally:
             await asyncio.to_thread(sandbox.close, delete=succeeded)
 
-    async def _run_unit(self, owner, assessment_id, generation, unit, plan, checkpointer):
-        previous = await asyncio.to_thread(self._completed_unit, owner, assessment_id, unit)
+    async def _run_unit(self, owner, assessment_id, generation, role, plan, checkpointer):
+        previous = await asyncio.to_thread(self._completed_unit, owner, assessment_id, role)
         if previous is not None:
             return previous
-        role, _, question = unit.partition(":")
         worker = await asyncio.to_thread(
-            self.service.assign_worker,
-            owner,
-            assessment_id,
-            generation,
-            role,
-            question or None,
+            self.service.assign_worker, owner, assessment_id, generation, role
         )
         artifact_dir = self.artifacts / assessment_id / worker["id"]
         inputs = self._input_hashes(
             self.service._heads(await asyncio.to_thread(self.state.records, owner, assessment_id)),
-            unit,
+            role,
         )
         creation = asyncio.create_task(
             asyncio.to_thread(
@@ -545,15 +457,12 @@ class AssessmentCoordinator:
                     self.state.records, owner, assessment_id, kind="repository_index"
                 )
             ]
-            if role != "review":
-                for record in indexes:
-                    await asyncio.to_thread(
-                        install_index, self.service.evidence, owner, assessment_id, record, sandbox
-                    )
+            for record in indexes:
+                await asyncio.to_thread(
+                    install_index, self.service.evidence, owner, assessment_id, record, sandbox
+                )
             brief = (await asyncio.to_thread(self.state.get, owner, assessment_id))["brief"]
-            context = ProviderContext(
-                self.state, owner, assessment_id, generation, role, question or None
-            )
+            context = ProviderContext(self.state, owner, assessment_id, generation, role)
             model = (
                 self._model_factory(context)
                 if self._model_factory
@@ -561,7 +470,7 @@ class AssessmentCoordinator:
                 if self.plan_credentials is not None
                 else accounted_model(context, self._router_key)
             )
-            if role != "review" and self.service.execution_mode == "live":
+            if self.service.execution_mode == "live":
                 research = ExaResearch(
                     context,
                     self.service.evidence,
@@ -600,7 +509,6 @@ class AssessmentCoordinator:
                         research=research,
                         repository_cache=self.artifacts / assessment_id / "repositories",
                         allowed_repositories=set(plan["repository_candidates"]),
-                        question_id=question or None,
                         callbacks=self.callbacks,
                         social=social,
                         code_model=subagents[0] if subagents else None,
@@ -614,12 +522,6 @@ class AssessmentCoordinator:
                         for key in completed["completion"]["accepted_hashes"]
                     }
                     worker_trace.outputs(answer)
-                    if (
-                        self.tracing is not None
-                        and role in STAGE_ROLES
-                        and self.service.execution_mode == "live"
-                    ):
-                        await asyncio.to_thread(self.tracing.record_example, worker_trace, answer)
             finally:
                 # Check presence after the root run closes; a missing trace is never a zero charge.
                 if self.tracing is not None:

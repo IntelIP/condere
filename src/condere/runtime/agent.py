@@ -1,7 +1,6 @@
 """Assemble a private Deep Agents worker with Condere's preserved methods."""
 
 import hashlib
-import json
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -24,33 +23,14 @@ METHODS_ROOT = Path(__file__).resolve().parents[3] / "agent"
 # 7k -> 40k input tokens per worker) and the plan route gave little prompt caching.
 # Clear older tool outputs past this size; saved sources stay retrievable by ID.
 CONTEXT_EDIT_TRIGGER_TOKENS = 24_000
-PROTECTED_TOOLS = (
-    "read_assessment",
-    "submit_question",
-    "submit_screen",
-    "submit_review",
-    "submit_analysis",
-)
-CORE_SKILLS = {
-    "opportunity-framing",
-    "repository-index",
-    "code-exploration",
-    "evidence-reconciliation",
-    "dossier-and-handoff",
-    "visual-reporting",
-}
+PROTECTED_TOOLS = ("read_assessment", "submit_analysis")
+# The instructions each model reads; they and the skills determine the method version.
+PROMPTS = ("lead.md", "planner.md", "subagents/code-analyst.md", "subagents/extractor.md")
 
 
 def method_files(root: Path = METHODS_ROOT, skills: list[str] | None = None) -> dict[str, bytes]:
     """All methods, or only the named skills a worker is assigned."""
     available = {path.parent.name for path in (root / "skills").glob("*/SKILL.md")}
-    referenced = {
-        skill
-        for question in json.loads((root / "references/questions.json").read_text()).values()
-        for skill in question["skills"]
-    }
-    if not (referenced | CORE_SKILLS).issubset(available):
-        raise ValueError("Condere requires every core and question-assigned research skill.")
     if skills is not None and not set(skills).issubset(available):
         raise ValueError("A worker was assigned an unknown skill.")
     files = {
@@ -60,13 +40,15 @@ def method_files(root: Path = METHODS_ROOT, skills: list[str] | None = None) -> 
         and path.suffix in {".md", ".py"}
         and (skills is None or path.relative_to(root / "skills").parts[0] in skills)
     }
-    files["/workspace/methods/questions.json"] = (root / "references/questions.json").read_bytes()
     files["/workspace/context/business.md"] = (root / "context/business.md").read_bytes()
     return files
 
 
 def method_version(root: Path = METHODS_ROOT) -> str:
-    digest = hashlib.sha256((root / "instructions.md").read_bytes())
+    digest = hashlib.sha256()
+    for prompt in PROMPTS:
+        digest.update(prompt.encode())
+        digest.update(hashlib.sha256((root / prompt).read_bytes()).digest())
     for path, content in method_files(root).items():
         digest.update(path.encode())
         digest.update(hashlib.sha256(content).digest())
@@ -82,9 +64,8 @@ def build_agent(
     tools=(),
     checkpointer=None,
     methods_root: Path = METHODS_ROOT,
-    instructions_file: str = "instructions.md",
 ):
-    """The application creates separate workers/VMs; nested shared-VM delegation is disabled."""
+    """The build planner, in its own VM; nested shared-VM delegation is disabled."""
     identifier, provider = get_model_identifier(model), get_model_provider(model)
     profile_key = f"{provider}:{identifier}" if provider and identifier else identifier
     if not profile_key or ":" not in profile_key:
@@ -97,12 +78,11 @@ def build_agent(
     transferred = sandbox.upload_files(list(method_files(methods_root, skills).items()))
     if any(item.error for item in transferred):
         raise RuntimeError("Could not load all required Condere methods into the assigned sandbox.")
-    instructions = (methods_root / instructions_file).read_text()
+    instructions = (methods_root / "planner.md").read_text()
     instructions += (
         "\n\nYour trusted assignment:\n"
         + assignment
-        + "\n\nQuestion methods are at /workspace/methods/questions.json. "
-        "Approved business context is at /workspace/context/business.md. "
+        + "\n\nApproved business context is at /workspace/context/business.md. "
         "Method copies are reference material; editing them cannot change the application contract."
     )
     return create_deep_agent(

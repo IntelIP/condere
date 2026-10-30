@@ -485,7 +485,7 @@ class PlanChatOpenAI(ChatOpenAI):
     def _attempt_key(self, payload: dict) -> str:
         """Reuse a saved answer; retry only after a retryable stop and explicit continuation."""
         context = self._context
-        base = f"model:chatgpt:{context.worker_role}:{context.question_id}:{content_hash(payload)}"
+        base = f"model:chatgpt:{context.worker_role}:{content_hash(payload)}"
         attempts = [
             item
             for item in context.state.operations(context.owner, context.assessment_id)

@@ -605,14 +605,7 @@ class AssessmentStore:
                     raise Conflict("A running assigned worker is required for this submission.")
                 assignment = worker["assignment"]
                 allowed = (
-                    (assignment["role"] == "screen" and (kind, key) == ("screen", "main"))
-                    or (
-                        assignment["role"] in {"technical", "market", "business"}
-                        and kind == "question"
-                        and key in assignment["question_ids"]
-                    )
-                    or (assignment["role"] == "review" and (kind, key) == ("review", "final"))
-                    or (assignment["role"] == "lead" and (kind, key) == ("analysis", "main"))
+                    (assignment["role"] == "lead" and (kind, key) == ("analysis", "main"))
                     or (assignment["role"] == "lead" and kind == "candidate_claim")
                     or (assignment["role"] == "planner" and (kind, key) == ("build_plan", "main"))
                 )
@@ -800,7 +793,7 @@ class AssessmentStore:
         payload: dict,
         expected: dict[str, str],
     ) -> dict:
-        """Atomically freeze the reviewed versions and complete this assessment."""
+        """Atomically freeze the accepted versions and complete this assessment."""
         with self.connection() as connection:
             self._active(self._lock(connection, owner, assessment_id), generation)
             if connection.execute(
@@ -808,24 +801,24 @@ class AssessmentStore:
                 "AND state IN ('reserved','dispatched','uncertain') LIMIT 1",
                 (assessment_id,),
             ).fetchone():
-                raise RecoveryRequired("Resolve pending operations before delivering the dossier.")
+                raise RecoveryRequired("Resolve pending operations before delivering the result.")
             if connection.execute(
                 "SELECT 1 FROM workers WHERE assessment_id=%s "
                 "AND status IN ('assigned','running') LIMIT 1",
                 (assessment_id,),
             ).fetchone():
-                raise Conflict("Workers must finish before the dossier is delivered.")
+                raise Conflict("Workers must finish before the result is delivered.")
             heads = connection.execute(
                 """SELECT DISTINCT ON (kind,record_key) kind,record_key,content_hash
                    FROM records WHERE assessment_id=%s
-                   AND kind IN ('screen','question','review','analysis','decision','build_plan')
+                   AND kind IN ('analysis','decision','build_plan')
                    ORDER BY kind,record_key,version DESC""",
                 (assessment_id,),
             ).fetchall()
             actual = {row["kind"] + ":" + row["record_key"]: row["content_hash"] for row in heads}
             if actual != expected:
                 raise Conflict(
-                    "Accepted findings changed after review; the dossier was not published."
+                    "Accepted results changed before publication; the result was not published."
                 )
             saved = connection.execute(
                 """INSERT INTO records (assessment_id,kind,record_key,version,content_hash,payload)

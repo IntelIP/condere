@@ -16,13 +16,7 @@ from botocore.exceptions import ClientError
 from pydantic import AwareDatetime, Field
 
 from condere.runtime.calculations import Record, Text
-from condere.runtime.contracts import (
-    AssessmentFindings,
-    Citation,
-    Finding,
-    OpportunityScreen,
-    QuestionAnswer,
-)
+from condere.runtime.contracts import Citation
 from condere.runtime.state import AssessmentStore, NotFound, content_hash
 
 MAX_OBJECT_BYTES = 80 * 1024 * 1024
@@ -282,65 +276,3 @@ class EvidenceStore:
             or text[citation.start : citation.end] != citation.quote
         ):
             raise EvidenceError("A cited passage does not match its saved source.")
-
-    def verify_findings(
-        self,
-        owner: str,
-        assessment_id: str,
-        findings: AssessmentFindings | QuestionAnswer | OpportunityScreen,
-    ) -> None:
-        """Check all references; semantic support remains the final reviewer's responsibility."""
-        receipts = {
-            record["record_key"]: record["payload"]
-            for record in self.state.records(owner, assessment_id, kind="measurement_receipt")
-        }
-
-        def measured_source(source_id: str, receipt_id: str | None = None) -> bool:
-            source = self.source(owner, assessment_id, source_id)
-            identity = source.provenance.get("receipt_id")
-            receipt = receipts.get(identity, {})
-            return (
-                source.kind == "measurement"
-                and (receipt_id is None or identity == receipt_id)
-                and receipt.get("source_id") == source.id
-                and receipt.get("original_sha256") == source.original_sha256
-            )
-
-        statements: list[Finding] = (
-            list(findings.questions)
-            if isinstance(findings, AssessmentFindings)
-            else ([findings] if isinstance(findings, QuestionAnswer) else [])
-        )
-        if isinstance(findings, OpportunityScreen):
-            for candidate in findings.candidates:
-                statements.extend(
-                    [
-                        candidate.problem,
-                        candidate.commercial_evidence,
-                        candidate.alternatives,
-                    ]
-                )
-            statements.extend(findings.contrary_evidence)
-        for source_id in {
-            source_id for statement in statements for source_id in statement.source_ids
-        }:
-            self.original(owner, assessment_id, source_id)
-        for statement in statements:
-            for citation in statement.citations:
-                self.verify_citation(owner, assessment_id, citation)
-            if statement.basis == "measured" and not any(
-                measured_source(source_id) for source_id in statement.source_ids
-            ):
-                raise EvidenceError("Measured findings need a protected, source-bound receipt.")
-            for calculation in getattr(statement, "calculations", []):
-                for item in calculation.inputs:
-                    if not set(item.source_ids).issubset(statement.source_ids):
-                        raise EvidenceError(
-                            "Calculation input sources need citations in their finding."
-                        )
-                    for source_id in item.source_ids:
-                        self.original(owner, assessment_id, source_id)
-                    if item.basis == "measured" and not any(
-                        measured_source(source_id) for source_id in item.source_ids
-                    ):
-                        raise EvidenceError("Measured calculation inputs need protected receipts.")

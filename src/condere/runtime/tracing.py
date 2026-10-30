@@ -1,6 +1,6 @@
 """LangSmith traces for assessment workers; state, evidence, and spending stay authoritative.
 
-Each worker is one root trace so a finished question or report becomes one dataset example.
+Each worker is one root trace; the decision and source funnel are separate step traces.
 Configure `LANGSMITH_API_KEY` plus either `LANGSMITH_PROJECT` or the agent address pair
 `LANGSMITH_AGENT_ID`/`LANGSMITH_AGENT_ENVIRONMENT`. Addressing is a per-workspace beta;
 a workspace without it rejects addressed runs, so select it only where it is enabled.
@@ -19,12 +19,10 @@ from langsmith.utils import LangSmithNotFoundError
 
 @dataclass
 class WorkerTrace:
-    """A worker's root run: its inputs and accepted outputs form one dataset example."""
+    """A worker's root run, which records the worker's accepted outputs."""
 
     trace_id: str | None = None
     run: object | None = None
-    inputs: Mapping[str, object] | None = None
-    metadata: Mapping[str, object] | None = None
 
     def outputs(self, values: Mapping[str, object]) -> None:
         if self.run is None:
@@ -43,11 +41,10 @@ class Tracing:
         release: str,
         project: str | None = None,
         address: AgentAddress | None = None,
-        dataset: str | None = None,
     ):
         if (project is None) == (address is None):
             raise ValueError("Select exactly one LangSmith destination: a project or an agent.")
-        self.client, self.release, self.dataset = client, release, dataset
+        self.client, self.release = client, release
         self.destination = {"address": address} if address else {"project_name": project}
 
     @classmethod
@@ -73,7 +70,6 @@ class Tracing:
             release=release,
             project=project or None,
             address=agent_address(agent, stage) if agent else None,
-            dataset=environment.get("LANGSMITH_DATASET") or None,
         )
 
     @contextlib.contextmanager
@@ -102,7 +98,7 @@ class Tracing:
                     **self.destination,
                 )
             )
-            handle = WorkerTrace(str(run.trace_id), run, inputs, metadata)
+            handle = WorkerTrace(str(run.trace_id), run)
         except Exception:
             stack.close()
             stack = contextlib.ExitStack()
@@ -145,27 +141,6 @@ class Tracing:
         except Exception:
             logging.getLogger(__name__).warning("Step trace %s could not be recorded.", name)
             return None
-
-    def record_example(self, handle: WorkerTrace, outputs: Mapping[str, object]) -> None:
-        """Add an accepted live answer to the candidate dataset, linked to its trace.
-
-        Written by the application rather than a LangSmith rule: on 2026-10-28 the rule
-        engine matched no successful runs although the same filter matched in queries.
-        """
-        if self.dataset is None or handle.run is None:
-            return
-        try:
-            self.client.create_example(
-                dataset_name=self.dataset,
-                inputs=dict(handle.inputs or {}),
-                outputs=dict(outputs),
-                metadata={**(handle.metadata or {}), "method_version": self.release},
-                source_run_id=handle.run.id,
-            )
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "Accepted answer could not be added to the dataset."
-            )
 
     def status(self, trace_id: str) -> tuple[str, str | None]:
         """Report trace presence; a missing trace never shows that no work or spend occurred."""

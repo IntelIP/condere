@@ -196,14 +196,17 @@ async def test_deep_agent_uses_real_sandbox_and_discovers_all_skills(sandboxes):
     assert "execute" in model.tool_names and "task" not in model.tool_names
     prompt = "\n".join(model.seen_system)
     for skill in (
-        "opportunity-framing",
+        "asset-understanding",
+        "rights-and-ownership",
+        "open-core-boundary",
+        "buyer-evidence",
+        "economics",
+        "next-test",
+        "build-plan",
+        "search-routing",
         "repository-index",
-        "architecture-analysis",
-        "managed-offering-design",
-        "market-evidence",
-        "business-strategy",
+        "code-exploration",
         "evidence-reconciliation",
-        "dossier-and-handoff",
     ):
         assert skill in prompt
 

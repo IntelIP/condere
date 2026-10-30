@@ -157,7 +157,7 @@ def analysis_payload(source_id: str, quote: str = "upgrades keep breaking") -> d
 
 
 @pytest.fixture
-def native_case(tmp_path, monkeypatch, request):
+def native_case(tmp_path, monkeypatch):
     for key in (
         "OPENROUTER_API_KEY",
         "CONDERE_OPENROUTER_API_KEY",
@@ -202,7 +202,6 @@ def native_case(tmp_path, monkeypatch, request):
             "original_input": (
                 "Assess a fictional library. No market or customer claims are established."
             ),
-            "analysis_depth": getattr(request, "param", "deep"),
         },
     )
     created, calls = [], []
@@ -394,7 +393,7 @@ async def test_continuation_after_an_unfinished_lead_reaches_the_decision(native
             )
         return factory(context)
 
-    with pytest.raises(ExceptionGroup):
+    with pytest.raises(Conflict, match="without submitting"):
         await make(incomplete).run(owner, case["id"])
     assert service.state.get(owner, case["id"])["status"] == "interrupted"
     assert service.decision(owner, case["id"]) is None and jev.asked == []

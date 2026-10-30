@@ -67,7 +67,7 @@ def provider_case(monkeypatch):
         method_version="test",
     )
     case = state.begin(owner, admitted["id"])
-    context = ProviderContext(state, owner, case["id"], case["generation"], "technical")
+    context = ProviderContext(state, owner, case["id"], case["generation"], "lead")
     return context, EvidenceStore(state, SimulatedObjects(), "condere-provider-test")
 
 

@@ -128,7 +128,7 @@ def test_usage_limit_stops_work_and_explicit_continuation_retries(provider_case,
     state.stop(owner, case, generation=context.generation)
     resumed = state.begin(owner, case, resume=True)  # No uncertain charge blocks continuation.
     later = plan_model(
-        type(context)(state, owner, case, resumed["generation"], "technical"),
+        type(context)(state, owner, case, resumed["generation"], "lead"),
         credentials(tmp_path),
         http_client=httpx.Client(transport=httpx.MockTransport(lambda request: replies.pop(0))),
     )
@@ -150,7 +150,7 @@ def test_uncapped_campaign_records_plan_usage(provider_case, tmp_path):
         owner, campaign, "intake", {"original": "x"}, policy_version="t", method_version="t"
     )
     case = state.begin(owner, admitted["id"])
-    context = ProviderContext(state, owner, case["id"], case["generation"], "technical")
+    context = ProviderContext(state, owner, case["id"], case["generation"], "lead")
     model = plan_model(
         context,
         credentials(tmp_path),
