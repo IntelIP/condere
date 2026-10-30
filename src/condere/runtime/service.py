@@ -16,6 +16,7 @@ from condere.runtime.contracts import (
     OpportunityScreen,
     QuestionAnswer,
 )
+from condere.runtime.decision import render_brief
 from condere.runtime.dossier import (
     AcceptedRecord,
     CheckedCalculation,
@@ -317,6 +318,9 @@ class AssessmentService:
         )
         if missing := analysis.unexpanded():
             raise ValueError(f"Claims {missing} reference no saved candidate claim.")
+        # The decision model reads a brief written from this analysis; refuse it now, while
+        # the lead can still shorten it, rather than after the lead has finished.
+        render_brief(analysis, self.state.get(owner, assessment_id)["brief"]["original_input"])
         for claim in analysis.claims:
             for citation in claim.citations:
                 self.evidence.verify_citation(owner, assessment_id, citation)

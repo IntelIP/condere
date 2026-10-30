@@ -49,16 +49,19 @@ VERDICTS = {
 }
 
 
-def _claims(analysis: Analysis, ids) -> str:
-    lines = []
-    for claim_id in ids:
-        claim = analysis.claim(claim_id)
-        lines.append(f"  - {claim.id} [{claim.status}] {claim.statement}")
-    return "\n".join(lines)
+STATEMENT_LIMIT = 240
+
+
+def _ids(ids) -> str:
+    return ", ".join(ids) if ids else "none"
 
 
 def render_brief(analysis: Analysis, prompt: str) -> str:
-    """The exact text Jev reads; it is saved and linked so anyone can audit or replay it."""
+    """The exact text Jev reads; it is saved and linked so anyone can audit or replay it.
+
+    Each claim appears once in the evidence section; sections cite claim IDs. Listing
+    full claims under every option made a 39-claim analysis 43.5 KB (run 4, 2026-10-30).
+    """
     asset, rights, buyer = analysis.asset, analysis.rights, analysis.buyer
     sections = [
         "# Decision brief",
@@ -66,8 +69,8 @@ def render_brief(analysis: Analysis, prompt: str) -> str:
         f"Thesis: {analysis.thesis}",
         f"Summary: {analysis.summary}",
         "## Asset",
-        f"{asset.summary}\nOwnership: {asset.ownership}. Maturity: {asset.maturity}.",
-        "Operating burden:\n" + _claims(analysis, asset.operating_burden),
+        f"{asset.summary}\nOwnership: {asset.ownership}. Maturity: {asset.maturity}.\n"
+        f"Operating burden evidence: {_ids(asset.operating_burden)}",
         "## Rights",
         f"{rights.summary}\nCan open-source: {rights.can_open_source}. "
         f"Can sell hosted: {rights.can_sell_hosted}.",
@@ -77,8 +80,7 @@ def render_brief(analysis: Analysis, prompt: str) -> str:
         ],
         "## Buyer",
         f"{buyer.summary}\nUser: {buyer.user}. Buyer: {buyer.buyer}. Trigger: {buyer.trigger}. "
-        f"Today: {buyer.current_solution}.",
-        _claims(analysis, buyer.claims),
+        f"Today: {buyer.current_solution}.\nEvidence: {_ids(buyer.claims)}",
         "## Options",
     ]
     for option in analysis.options:
@@ -87,8 +89,15 @@ def render_brief(analysis: Analysis, prompt: str) -> str:
             f"Open: {option.open_part}\nPaid: {option.paid_part}\nBuyer: {option.buyer}\n"
             f"Why pay: {option.why_pay}\nMain risk: {option.main_risk}",
             f"Case for: {option.case_for}\nCase against: {option.case_against}",
-            "Evidence:\n" + _claims(analysis, option.claims),
+            f"Evidence: {_ids(option.claims)}",
         ]
+    sections.append("## Evidence")
+    sections.append(
+        "\n".join(
+            f"- {claim.id} [{claim.status}] {claim.statement[:STATEMENT_LIMIT]}"
+            for claim in analysis.claims
+        )
+    )
     if analysis.open_questions:
         sections.append("## Open questions")
         sections += [
@@ -98,7 +107,8 @@ def render_brief(analysis: Analysis, prompt: str) -> str:
     text = "\n\n".join(section for section in sections if section)
     if len(text.encode()) > BRIEF_LIMIT:
         raise ValueError(
-            "The decision brief exceeds 30,000 bytes; shorten the analysis summaries and options."
+            f"The decision brief would be {len(text.encode())} bytes, over {BRIEF_LIMIT}; "
+            "shorten the summaries, option cases and claim statements."
         )
     return text
 

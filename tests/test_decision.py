@@ -77,6 +77,6 @@ def test_oversized_brief_is_refused_before_any_request():
         option | {"case_for": "y" * 9_000, "case_against": "z" * 9_000}
         for option in long["options"]
     ]
-    with pytest.raises(ValueError, match="30,000 bytes"):
+    with pytest.raises(ValueError, match="over 30000"):
         render_brief(Analysis.model_validate(long), "Assess it.")
     assert BRIEF_LIMIT < 32_000
