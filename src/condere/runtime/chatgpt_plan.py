@@ -37,7 +37,12 @@ from openai import APIError, APIStatusError, OpenAI
 from pydantic import PrivateAttr
 
 from condere.runtime.operations import ProviderResult, execute_once
-from condere.runtime.providers import ProviderContext, _decode_result, _encode_result
+from condere.runtime.providers import (
+    WORKING_CONTEXT_TOKENS,
+    ProviderContext,
+    _decode_result,
+    _encode_result,
+)
 from condere.runtime.state import StateError, content_hash
 
 ISSUER = "https://auth.openai.com"
@@ -666,7 +671,7 @@ def plan_model(
         include=["reasoning.encrypted_content"],
         reasoning={"effort": "medium"},
         profile={
-            "max_input_tokens": 48_000,
+            "max_input_tokens": WORKING_CONTEXT_TOKENS,
             "tool_calling": True,
             "structured_output": True,
             "image_inputs": True,

@@ -80,6 +80,13 @@ CLAUDE_HAIKU = ModelSpec(
     {"prompt": 0.1, "completion": 0.5},
     forced_tool_choice=False,
 )
+# The working context Deep Agents may fill before it summarises a conversation (it compacts
+# at 85% of `max_input_tokens`). A 48,000-token target suited the retired one-question
+# workers; for the spin-off lead it triggered summaries at ~26k real tokens. Run 4
+# (2026-10-30) spent ~9 minutes of its ~29-minute critical path writing summaries (lead
+# 4.8 min, code analyst 1.6, planner 2.0). Tool outputs are still cleared by
+# context editing, and every request is still reserved at the model's full context.
+WORKING_CONTEXT_TOKENS = 200_000
 MODEL_ID = GPT_SOL.id
 MODEL_CONTEXT_TOKENS = GPT_SOL.context_tokens
 MODEL_OUTPUT_TOKENS = GPT_SOL.output_tokens
@@ -366,7 +373,7 @@ def accounted_model(
         include=["reasoning.encrypted_content"],
         extra_body=router_options(spec),
         profile={
-            "max_input_tokens": 48_000,
+            "max_input_tokens": WORKING_CONTEXT_TOKENS,
             "max_output_tokens": spec.output_tokens,
             "tool_calling": True,
             "structured_output": True,
