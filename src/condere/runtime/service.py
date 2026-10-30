@@ -4,7 +4,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from condere.runtime.agent import method_version
+from condere.runtime.agent import code_method_version, method_version
 from condere.runtime.bundle import artifact_link, build_result, render_artifacts, render_readme
 from condere.runtime.contracts import IntakeBrief
 from condere.runtime.decision import render_brief
@@ -85,6 +85,7 @@ class AssessmentService:
             raise ValueError("Select simulation or live execution explicitly.")
         self.state, self.evidence, self.execution_mode = state, evidence, execution_mode
         self.method_version = method_version()
+        self.code_method = code_method_version()
         self.policy_version = POLICY_VERSION + ":" + execution_mode
 
     def _compatible(self, assessment: dict) -> None:
@@ -198,9 +199,15 @@ class AssessmentService:
         """Save each verified claim as a candidate the lead can reference by ID.
 
         Claims are checked one by one; a rejected claim returns its reason so it can be
-        fixed, without discarding the accepted ones. Identical claims share one ID.
+        fixed, without discarding the accepted ones. Identical claims share one ID, whoever
+        saved it first. Code-analyst claims carry the code-analysis method that produced them,
+        so a later assessment of the same commit can reuse them.
         """
         self._worker(owner, assessment_id, generation, worker_id, "lead")
+        saved = {
+            record["record_key"]
+            for record in self.state.records(owner, assessment_id, kind="candidate_claim")
+        }
         accepted, rejected = [], []
         for index, item in enumerate(claims):
             try:
@@ -213,16 +220,20 @@ class AssessmentService:
                 rejected.append({"index": index, "error": str(error)[:500]})
                 continue
             payload = claim.model_dump(mode="json") | {"origin": origin}
+            if origin == "code-analyst":
+                payload["code_method"] = self.code_method
             identity = "X" + content_hash(claim.model_dump(mode="json"))[:10]
-            self.state.append_record(
-                owner,
-                assessment_id,
-                "candidate_claim",
-                identity,
-                payload,
-                generation=generation,
-                worker_id=worker_id,
-            )
+            if identity not in saved:
+                self.state.append_record(
+                    owner,
+                    assessment_id,
+                    "candidate_claim",
+                    identity,
+                    payload,
+                    generation=generation,
+                    worker_id=worker_id,
+                )
+                saved.add(identity)
             accepted.append({"index": index, "candidate": identity})
         return {"accepted": accepted, "rejected": rejected}
 
@@ -240,7 +251,146 @@ class AssessmentService:
                 ),
                 "origin": record["payload"].get("origin"),
             }
+            | (
+                {"reused_from": record["payload"]["reused_from"]}
+                if "reused_from" in record["payload"]
+                else {}
+            )
             for record in sorted(heads.values(), key=lambda item: item["created_at"])
+        ]
+
+    def reuse_code_claims(self, owner, assessment_id) -> list[dict]:
+        """Copy verified code-analyst claims from the owner's latest compatible assessment.
+
+        For each repository this assessment pinned, the source is the owner's most recent
+        completed assessment that pinned the same commit and saved code-analyst claims under
+        the same code-analysis method (`agent.code_method_version`) and policy. A claim is
+        reused only when every citation is to that repository at that commit. Its sources are
+        copied under their original identity, and the claim is re-verified against the copies
+        through the normal citation checks. Each copy is recorded once as a `reuse` record.
+        """
+        done = {
+            item["record_key"] for item in self.state.records(owner, assessment_id, kind="reuse")
+        }
+        reused = []
+        for pin in self.state.records(owner, assessment_id, kind="repository_pin"):
+            if pin["record_key"] in done:
+                continue
+            repository, commit = pin["payload"]["repository"], pin["payload"]["commit"]
+            for previous in self.state.completed_with_code_claims(
+                owner,
+                assessment_id,
+                repository,
+                commit,
+                policy_version=self.policy_version,
+                code_method=self.code_method,
+            ):
+                claims = self._reusable_claims(owner, previous, repository, commit)
+                if claims:
+                    reused.append(
+                        self._copy_claims(
+                            owner,
+                            assessment_id,
+                            previous,
+                            pin["record_key"],
+                            pin["payload"],
+                            claims,
+                        )
+                    )
+                    break
+        return reused
+
+    def _reusable_claims(self, owner, previous, repository, commit) -> list[dict]:
+        heads = self._heads(self.state.records(owner, previous, kind="candidate_claim"))
+        sources, reusable = {}, []
+        for record in sorted(heads.values(), key=lambda item: item["created_at"]):
+            payload = record["payload"]
+            citations = payload.get("citations") or []
+            if (
+                payload.get("origin") != "code-analyst"
+                or payload.get("code_method") != self.code_method
+                or not citations
+            ):
+                continue
+            for citation in citations:
+                source_id = citation["source_id"]
+                if source_id not in sources:
+                    sources[source_id] = self.evidence.source(owner, previous, source_id)
+            if all(
+                sources[item["source_id"]].origin == repository
+                and sources[item["source_id"]].provenance.get("commit") == commit
+                for item in citations
+            ):
+                reusable.append(payload)
+        return reusable
+
+    def _copy_claims(self, owner, assessment_id, previous, key, pin, claims) -> dict:
+        existing = {
+            item["record_key"]
+            for item in self.state.records(owner, assessment_id, kind="candidate_claim")
+        }
+        copied_sources, candidates, skipped = set(), [], []
+        for payload in claims:
+            try:
+                for source_id in {item["source_id"] for item in payload["citations"]}:
+                    if source_id not in copied_sources:
+                        self.evidence.copy_source(owner, previous, assessment_id, source_id)
+                        copied_sources.add(source_id)
+                claim = ExtractedClaim.model_validate(
+                    self.evidence.resolve_citations(
+                        owner,
+                        assessment_id,
+                        {
+                            name: payload[name]
+                            for name in ExtractedClaim.model_fields
+                            if name in payload
+                        },
+                    )
+                )
+                for citation in claim.citations:
+                    self.evidence.verify_citation(owner, assessment_id, citation)
+            except (ValueError, EvidenceError, NotFound) as error:
+                skipped.append(str(error)[:200])
+                continue
+            identity = "X" + content_hash(claim.model_dump(mode="json"))[:10]
+            if identity not in existing:
+                self.state.append_record(
+                    owner,
+                    assessment_id,
+                    "candidate_claim",
+                    identity,
+                    claim.model_dump(mode="json")
+                    | {
+                        "origin": "code-analyst",
+                        "code_method": self.code_method,
+                        "reused_from": previous,
+                    },
+                )
+                existing.add(identity)
+            candidates.append(identity)
+        record = {
+            "repository": pin["repository"],
+            "commit": pin["commit"],
+            "code_method": self.code_method,
+            "reused_from": previous,
+            "candidates": candidates,
+            "sources": sorted(copied_sources),
+            "skipped": skipped,
+        }
+        self.state.append_record(owner, assessment_id, "reuse", key, record)
+        return record
+
+    def reused_code_analysis(self, owner, assessment_id) -> list[dict]:
+        """What `reuse_code_claims` copied, for the lead: its claims are already candidates."""
+        return [
+            {
+                "repository": item["payload"]["repository"],
+                "commit": item["payload"]["commit"],
+                "reused_from": item["payload"]["reused_from"],
+                "claims": len(item["payload"]["candidates"]),
+                "sources": len(item["payload"]["sources"]),
+            }
+            for item in self.state.records(owner, assessment_id, kind="reuse")
         ]
 
     def _expand_candidates(self, owner, assessment_id, payload: dict) -> dict:

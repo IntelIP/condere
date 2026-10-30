@@ -662,6 +662,36 @@ class AssessmentStore:
                 (assessment_id, kind, kind),
             ).fetchall()
 
+    def completed_with_code_claims(
+        self,
+        owner: str,
+        assessment_id: str,
+        repository: str,
+        commit: str,
+        *,
+        policy_version: str,
+        code_method: str,
+        limit: int = 5,
+    ) -> list[str]:
+        """The owner's other completed assessments, newest first, that pinned this exact
+        repository commit and saved code-analyst claims under this code-analysis method."""
+        with self.connection() as connection:
+            self._assessment(connection, owner, assessment_id)
+            rows = connection.execute(
+                """SELECT a.id FROM assessments a
+                   WHERE a.owner_id=%s AND a.id<>%s AND a.status='completed'
+                   AND a.policy_version=%s
+                   AND EXISTS (SELECT 1 FROM records r WHERE r.assessment_id=a.id
+                       AND r.kind='repository_pin' AND r.payload->>'repository'=%s
+                       AND r.payload->>'commit'=%s)
+                   AND EXISTS (SELECT 1 FROM records c WHERE c.assessment_id=a.id
+                       AND c.kind='candidate_claim' AND c.payload->>'origin'='code-analyst'
+                       AND c.payload->>'code_method'=%s)
+                   ORDER BY a.updated_at DESC, a.id LIMIT %s""",
+                (owner, assessment_id, policy_version, repository, commit, code_method, limit),
+            ).fetchall()
+            return [row["id"] for row in rows]
+
     def admit_repository(
         self, owner: str, assessment_id: str, generation: int, repository: str, basis: dict
     ) -> set[str]:

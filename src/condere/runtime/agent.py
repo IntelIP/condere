@@ -22,6 +22,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 
 from condere.runtime.operations import ProviderRefused, ProviderUncertain
+from condere.runtime.providers import CLAUDE_OPUS
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.spinoff import ClaimBatch
 
@@ -59,6 +60,23 @@ def method_version(root: Path = METHODS_ROOT) -> str:
     for path, content in method_files(root).items():
         digest.update(path.encode())
         digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
+# What determines the code analyst's claims, and so whether another assessment's claims for
+# the same repository commit can be reused: its prompt, the two skills its prompt directs it
+# to (index and Graphify navigation), and its model. Lead, extractor and planner edits, and
+# the other skills, do not change it.
+CODE_ANALYST_SKILLS = ["repository-index", "code-exploration"]
+
+
+def code_method_version(root: Path = METHODS_ROOT) -> str:
+    digest = hashlib.sha256(CLAUDE_OPUS.id.encode())
+    digest.update(hashlib.sha256((root / "subagents/code-analyst.md").read_bytes()).digest())
+    for path, content in method_files(root, CODE_ANALYST_SKILLS).items():
+        if path.startswith("/workspace/skills/"):
+            digest.update(path.encode())
+            digest.update(hashlib.sha256(content).digest())
     return digest.hexdigest()
 
 

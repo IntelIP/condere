@@ -40,6 +40,7 @@ def test_funnel_follows_sources_by_route_to_the_options():
     assert funnel["claims"] == {
         "candidates": 2,
         "candidates_used": 1,
+        "candidates_reused": 0,
         "analysis": 3,
         "relied_on_by_options": 2,
     }

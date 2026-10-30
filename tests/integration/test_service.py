@@ -11,7 +11,13 @@ from test_evidence import SimulatedObjects
 from condere.runtime.bundle import render_readme
 from condere.runtime.evidence import EvidenceError, EvidenceStore
 from condere.runtime.service import AssessmentService
-from condere.runtime.state import AssessmentStore, Conflict, NotFound, RecoveryRequired
+from condere.runtime.state import (
+    AssessmentStore,
+    Conflict,
+    NotFound,
+    RecoveryRequired,
+    content_hash,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -65,10 +71,10 @@ def saved_source(service, owner, case, text=b"Operators report upgrades keep bre
     )
 
 
-def publish(service, owner, case, source):
+def publish(service, owner, case, source, lead=None):
     from test_coordinator import publish_spinoff
 
-    return publish_spinoff(service, owner, case, source.id)
+    return publish_spinoff(service, owner, case, source.id, lead)
 
 
 def test_complete_report_and_portable_export_use_same_saved_result(setup_case, tmp_path):
@@ -274,3 +280,179 @@ def test_claims_ledger_saves_verified_claims_and_expands_references(setup_case):
     payload["claims"][0] = {"id": "C1", "candidate": "X0000000000"}
     with pytest.raises(ValueError, match="unknown candidate"):
         service.submit_analysis(owner, case["id"], case["generation"], lead["id"], payload)
+
+
+REPOSITORY = "https://github.com/example/fictional"
+COMMIT = "a" * 40
+
+
+@pytest.fixture
+def reuse_owner():
+    store = AssessmentStore(os.environ["CONDERE_DATABASE_URL"])
+    store.setup()
+    evidence = EvidenceStore(store, SimulatedObjects(), "condere-reuse-test")
+    service = AssessmentService(store, evidence, execution_mode="simulation")
+
+    def owner_with_campaign():
+        owner, campaign = "reuse-test-" + str(uuid4()), str(uuid4())
+        store.authorize_campaign(
+            owner, campaign, 1_000_000, {"basis": "simulation"}, assessment_limit=10
+        )
+        return owner, campaign
+
+    return service, owner_with_campaign
+
+
+def pinned_case(service, owner, campaign, commit=COMMIT):
+    admitted = service.admit(
+        owner, campaign, str(uuid4()), {"original_input": "Assess the fictional repository."}
+    )
+    case = service.begin(owner, admitted["id"])
+    service.state.append_record(
+        owner,
+        case["id"],
+        "repository_pin",
+        content_hash(REPOSITORY),
+        {"repository": REPOSITORY, "commit": commit, "archive_sha256": "b" * 64},
+    )
+    return case
+
+
+def completed_code_analysis(service, owner, campaign, commit=COMMIT):
+    """A completed fictional assessment whose code analyst and extractor saved claims."""
+    case = pinned_case(service, owner, campaign, commit)
+    code = "FILE: LICENSE\nReleased under the MIT License.\nFILE: src/vec.c\nint vec_dims = 8;"
+    repository = service.evidence.save_source(
+        owner,
+        case["id"],
+        kind="repository",
+        origin=REPOSITORY,
+        original=b"fictional archive bytes " + commit.encode(),
+        text=code,
+        media_type="application/gzip",
+        provenance={"commit": commit, "manifest": [{"path": "LICENSE", "kind": "file"}]},
+        limitations=["Only the named files were read."],
+    )
+    web = saved_source(service, owner, case)
+    lead = worker(service, owner, case, "lead")
+
+    def claim(statement, source, quote):
+        return {
+            "statement": statement,
+            "status": "observed",
+            "citations": [{"source_id": source.id, "quote": quote}],
+        }
+
+    code_claims = service.submit_claims(
+        owner,
+        case["id"],
+        case["generation"],
+        lead["id"],
+        [
+            claim("The code is MIT licensed.", repository, "Released under the MIT License."),
+            claim("Vectors have eight dimensions.", repository, "int vec_dims = 8;"),
+            claim("Upgrades break.", web, "upgrades keep breaking"),
+            {"statement": "It permits hosting.", "status": "modelled"},
+        ],
+        origin="code-analyst",
+    )
+    service.submit_claims(
+        owner,
+        case["id"],
+        case["generation"],
+        lead["id"],
+        [claim("The license is MIT.", repository, "MIT License")],
+        origin="extractor",
+    )
+    publish(service, owner, case, repository, lead=lead)
+    candidates = [item["candidate"] for item in code_claims["accepted"]]
+    return case, repository, candidates
+
+
+def test_reuse_copies_verified_code_claims_and_their_sources(reuse_owner):
+    from test_coordinator import analysis_payload
+
+    from condere.runtime.contracts import Citation
+
+    service, owner_with_campaign = reuse_owner
+    owner, campaign = owner_with_campaign()
+    completed_code_analysis(service, owner, campaign)
+    previous, repository, candidates = completed_code_analysis(service, owner, campaign)
+    case = pinned_case(service, owner, campaign)
+
+    [reuse] = service.reuse_code_claims(owner, case["id"])
+    assert reuse["reused_from"] == previous["id"]  # The most recent compatible assessment.
+    assert reuse["candidates"] == candidates[:2]  # Code claims citing the commit only.
+    assert reuse["sources"] == [repository.id] and reuse["skipped"] == []
+    assert service.evidence.source(owner, case["id"], repository.id) == repository
+    assert service.evidence.original(owner, case["id"], repository.id) == (
+        service.evidence.original(owner, previous["id"], repository.id)
+    )
+    listed = service.candidate_claims(owner, case["id"])
+    assert [item["candidate"] for item in listed] == candidates[:2]
+    assert {(item["origin"], item["reused_from"]) for item in listed} == {
+        ("code-analyst", previous["id"])
+    }
+    for record in service.state.records(owner, case["id"], kind="candidate_claim"):
+        assert record["payload"]["code_method"] == service.code_method
+        for citation in record["payload"]["citations"]:
+            service.evidence.verify_citation(owner, case["id"], Citation.model_validate(citation))
+    assert service.reused_code_analysis(owner, case["id"]) == [
+        {
+            "repository": REPOSITORY,
+            "commit": COMMIT,
+            "reused_from": previous["id"],
+            "claims": 2,
+            "sources": 1,
+        }
+    ]
+    before = service.state.records(owner, case["id"])
+    assert service.reuse_code_claims(owner, case["id"]) == []  # Recorded once per repository.
+    assert service.state.records(owner, case["id"]) == before
+
+    # A code analyst re-saving a reused claim gets the same ID; the lead cites it by ID.
+    lead = worker(service, owner, case, "lead")
+    again = service.submit_claims(
+        owner,
+        case["id"],
+        case["generation"],
+        lead["id"],
+        [
+            {
+                "statement": "The code is MIT licensed.",
+                "status": "observed",
+                "citations": [
+                    {"source_id": repository.id, "quote": "Released under the MIT License."}
+                ],
+            }
+        ],
+        origin="code-analyst",
+    )
+    assert again == {"accepted": [{"index": 0, "candidate": candidates[0]}], "rejected": []}
+    payload = analysis_payload(repository.id, "MIT License")
+    payload["claims"][0] = {"id": "C1", "candidate": candidates[0]}
+    service.submit_analysis(owner, case["id"], case["generation"], lead["id"], payload)
+    assert service.analysis(owner, case["id"]).claim("C1").statement == "The code is MIT licensed."
+
+
+def test_no_reuse_across_commits_owners_or_code_methods(reuse_owner):
+    service, owner_with_campaign = reuse_owner
+    owner, campaign = owner_with_campaign()
+    completed_code_analysis(service, owner, campaign)
+
+    other_commit = pinned_case(service, owner, campaign, commit="c" * 40)
+    assert service.reuse_code_claims(owner, other_commit["id"]) == []
+
+    stranger, stranger_campaign = owner_with_campaign()
+    other_owner = pinned_case(service, stranger, stranger_campaign)
+    assert service.reuse_code_claims(stranger, other_owner["id"]) == []
+
+    changed = AssessmentService(service.state, service.evidence, execution_mode="simulation")
+    changed.code_method = "a-changed-code-analyst-prompt-or-skill"
+    other_method = pinned_case(changed, owner, campaign)
+    assert changed.reuse_code_claims(owner, other_method["id"]) == []
+
+    for owner_id, case in ((owner, other_commit), (stranger, other_owner), (owner, other_method)):
+        assert service.state.records(owner_id, case["id"], kind="candidate_claim") == []
+        assert service.state.records(owner_id, case["id"], kind="source") == []
+        assert service.reused_code_analysis(owner_id, case["id"]) == []

@@ -15,6 +15,7 @@ from smol import ConnectOptions, Machine
 from condere.runtime.chatgpt_plan import PlanChatOpenAI, PlanCredentials, plan_model
 from condere.runtime.checkpoints import checkpoint_store
 from condere.runtime.decision import decide
+from condere.runtime.evidence import EvidenceError
 from condere.runtime.indexing import (
     build_index,
     github_metadata,
@@ -36,7 +37,7 @@ from condere.runtime.providers import (
 from condere.runtime.repositories import canonical_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
-from condere.runtime.state import Conflict
+from condere.runtime.state import Conflict, NotFound
 from condere.runtime.tracing import Tracing, WorkerTrace
 from condere.runtime.workers import run_worker
 
@@ -233,6 +234,7 @@ class AssessmentCoordinator:
             self._tasks[(owner, assessment_id)] = asyncio.current_task()
             try:
                 await self._index(owner, assessment_id, generation, plan)
+                await asyncio.to_thread(self._reuse, owner, assessment_id)
                 async with checkpoint_store(
                     self.checkpoint_dsn, application_dsn=self.application_dsn
                 ) as checkpointer:
@@ -333,10 +335,11 @@ class AssessmentCoordinator:
                 "candidate_use": round(claims["candidates_used"] / claims["candidates"], 3)
                 if claims["candidates"]
                 else None,
+                "candidates_reused": claims["candidates_reused"],
             },
         )
 
-    def _worker_trace(self, worker, assessment_id, generation, brief, indexes):
+    def _worker_trace(self, worker, assessment_id, generation, brief, indexes, reused=()):
         if self.tracing is None:
             return contextlib.nullcontext(WorkerTrace())
         assignment = worker["assignment"]
@@ -355,9 +358,20 @@ class AssessmentCoordinator:
                 "role": assignment["role"],
                 "skills": assignment["skills"],
                 "execution_mode": self.service.execution_mode,
+                "reused_code_claims": sum(item["claims"] for item in reused),
+                "reused_from": sorted({item["reused_from"] for item in reused}),
             },
             tags=["condere", assignment["role"]],
         )
+
+    def _reuse(self, owner, assessment_id):
+        """Reuse verified code claims for a pinned commit; failure only means no reuse."""
+        try:
+            self.service.reuse_code_claims(owner, assessment_id)
+        except (Conflict, EvidenceError, NotFound, ValueError) as error:
+            logging.getLogger(__name__).warning(
+                "Code-analysis reuse was skipped (%s).", type(error).__name__
+            )
 
     async def _index(self, owner, assessment_id, generation, plan):
         """Deterministically index each admitted repository once, before any model work."""
@@ -494,8 +508,13 @@ class AssessmentCoordinator:
                     )
             worker_trace = WorkerTrace()
             try:
+                reused = (
+                    await asyncio.to_thread(self.service.reused_code_analysis, owner, assessment_id)
+                    if role == "lead"
+                    else []
+                )
                 with self._worker_trace(
-                    worker, assessment_id, generation, brief, indexes
+                    worker, assessment_id, generation, brief, indexes, reused
                 ) as worker_trace:
                     completed = await run_worker(
                         self.service,
