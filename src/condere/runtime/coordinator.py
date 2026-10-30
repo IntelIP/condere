@@ -47,6 +47,10 @@ from condere.runtime.state import Conflict, NotFound
 from condere.runtime.tracing import Tracing, WorkerTrace
 from condere.runtime.workers import run_worker
 
+# Held calls reserved at or below this are closed at delivery or continuation, charged in full
+# (owner decision 2026-10-30); larger ones still need explicit reconciliation.
+SMALL_CHARGE_MICROUSD = 250_000
+
 
 class AssessmentCoordinator:
     def __init__(
@@ -232,6 +236,9 @@ class AssessmentCoordinator:
                 )
             if resume:
                 await self._stop_machines(owner, assessment_id)
+                await asyncio.to_thread(
+                    self.state.settle_small_uncertain, owner, assessment_id, SMALL_CHARGE_MICROUSD
+                )
             plan = await asyncio.to_thread(
                 self._plan, owner, assessment_id, current["brief"], private_terms
             )
@@ -256,6 +263,9 @@ class AssessmentCoordinator:
                         await self._run_unit(
                             owner, assessment_id, generation, "planner", plan, checkpointer
                         )
+                await asyncio.to_thread(
+                    self.state.settle_small_uncertain, owner, assessment_id, SMALL_CHARGE_MICROUSD
+                )
                 result = await asyncio.to_thread(
                     self.service.finalize_spinoff, owner, assessment_id, generation
                 )

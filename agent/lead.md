@@ -32,6 +32,16 @@ One `Analysis`, submitted with `submit_analysis`. Its exact schema is in
 Write the case for and against each option before any decision exists. Be
 balanced: the decision model reads exactly what you write.
 
+Write densely; the analysis is written in one pass and its length is time. Claim
+IDs carry the evidence, so do not restate it. Aim for:
+- `summary` under 800 characters; `asset`, `rights` and `buyer` summaries under
+  400 each;
+- two or three options (a fourth only when it is a materially different route),
+  each field one line, `case_for` and `case_against` under 400 characters each;
+- each claim you write in full in one sentence;
+- `next_test` fields one or two sentences each; at most six `open_questions`, one
+  line each.
+
 ## How to work
 
 Plan with your todo list, then work in this order, revisiting earlier sections
@@ -59,7 +69,8 @@ when evidence changes them:
      not switch) and a recency window of about the last 12 months:
      - practitioners on Reddit (name the relevant communities) and Hacker News;
      - practitioners on X;
-     - news, vendors, competitors and current pricing pages;
+     - competitors, vendors and their current pricing pages;
+     - recent news and launches in the category;
      - talks and demos on YouTube where the capability is shown in use.
      Ask each to run its searches and return dated claims.
    Buyer evidence is where most decisions are won or lost; spend your research

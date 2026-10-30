@@ -486,3 +486,27 @@ def test_money_and_original_identity_do_not_accept_floats_or_non_json():
     assert content_hash({"a": 1, "b": 2}) == content_hash({"b": 2, "a": 1})
     with pytest.raises(ValueError):
         content_hash({"unknown": float("nan")})
+
+
+def test_small_held_calls_close_at_their_full_reservation(store):
+    owner, case = running(store)
+
+    def lost():
+        raise TimeoutError("simulated response loss")
+
+    options = dict(
+        owner=owner,
+        assessment_id=case["id"],
+        generation=case["generation"],
+        kind="simulation",
+        request={"prompt": "fixture"},
+        dispatch_identity={"provider": "simulation"},
+        invoke=lost,
+    )
+    for key, bound in (("small", 63_000), ("large", 400_000)):
+        with pytest.raises(ProviderUncertain):
+            execute_once(store, **(options | {"key": key, "max_microusd": bound}))
+    [small] = store.settle_small_uncertain(owner, case["id"], 250_000)
+    assert (small["state"], small["actual_microusd"]) == ("failed", 63_000)
+    states = {item["operation_key"]: item["state"] for item in store.operations(owner, case["id"])}
+    assert states == {"small": "failed", "large": "uncertain"}  # Larger calls still need review.

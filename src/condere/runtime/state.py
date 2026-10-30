@@ -451,6 +451,36 @@ class AssessmentStore:
                 (Jsonb(identity), operation_id),
             ).fetchone()
 
+    def settle_small_uncertain(self, owner: str, assessment_id: str, limit_microusd: int) -> list:
+        """Close held calls reserved at or below the limit as failed, charged in full.
+
+        Owner decision 2026-10-30: a held call of at most $0.25 (for example an Exa read
+        timeout) no longer blocks delivery or continuation. Its outcome is unknown, so it is
+        recorded as failed and charged at its whole reservation: spend is never under-counted
+        and the request is never bought again. Larger held calls still need reconciliation.
+        """
+        settled = []
+        for operation in self.operations(owner, assessment_id):
+            if operation["state"] != "uncertain" or operation["reserved_microusd"] > limit_microusd:
+                continue
+            settled.append(
+                self.finish_operation(
+                    owner,
+                    assessment_id,
+                    operation["id"],
+                    operation["result"] or {"error": "no response observed"},
+                    succeeded=False,
+                    actual_microusd=operation["reserved_microusd"],
+                    cost_basis={
+                        "basis": "outcome unknown; charged at the full reservation under the "
+                        "small-charge rule",
+                        "limit_microusd": limit_microusd,
+                    },
+                    reconciliation={"basis": "small held call closed automatically at delivery"},
+                )
+            )
+        return settled
+
     def mark_uncertain(self, owner: str, assessment_id: str, operation_id: str, detail: str):
         """Hold one failed dispatch for reconciliation without stopping the assessment."""
         with self.connection() as connection:
