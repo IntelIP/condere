@@ -136,6 +136,14 @@ class OpenQuestion(Record):
     who_can_answer: Literal["agent", "founder", "customer", "counsel"]
 
 
+class NextTest(Record):
+    assumption: Text
+    method: Text
+    success: Text
+    failure: Text
+    cost_and_time: Text
+
+
 class Analysis(Record):
     """Everything the agent establishes before any decision is made."""
 
@@ -146,6 +154,7 @@ class Analysis(Record):
     rights: Rights
     buyer: Buyer
     options: list[Option] = Field(min_length=2, max_length=4)
+    next_test: NextTest
     open_questions: list[OpenQuestion] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -213,14 +222,6 @@ class BuildPlan(Record):
             if unknown := set(package.depends_on) - set(ids):
                 raise ValueError(f"{package.id} depends on unknown packages {sorted(unknown)}.")
         return self
-
-
-class NextTest(Record):
-    assumption: Text
-    method: Text
-    success: Text
-    failure: Text
-    cost_and_time: Text
 
 
 class Distribution(Record):

@@ -6,9 +6,7 @@ import zipfile
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
 from test_coordinator import native_case as native_case
-from test_sandbox import RehearsalModel
 from test_service import setup_case as setup_case
 from test_service import worker
 
@@ -146,41 +144,3 @@ def test_saved_source_search_returns_exact_reusable_passages(setup_case, tmp_pat
     service.evidence.verify_citation(owner, case["id"], citation)
     assert service.state.operations(owner, case["id"]) == []
     assert tools["search_saved_sources"].invoke({"terms": ["unseen"]})["matches"] == []
-
-
-@pytest.mark.parametrize("native_case", ["adaptive"], indirect=True)
-@pytest.mark.parametrize("recommendation", ["needs_customer_evidence", "deepen"])
-@pytest.mark.skipif(
-    os.environ.get("CONDERE_TEST_SANDBOX") != "1", reason="Explicit native sandbox opt-in required"
-)
-@pytest.mark.asyncio
-async def test_native_screen_routes_and_preserves_deep_contract(native_case, recommendation):
-    service, owner, case, make, factory, calls, created, artifacts = native_case
-    model = RehearsalModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    dict(
-                        name="submit_screen",
-                        id="screen-1",
-                        args={"payload": screen_payload(recommendation)},
-                    )
-                ],
-            ),
-            AIMessage(content="Fixture qualification submitted."),
-        ]
-    )
-
-    def models(context):
-        return model if context.worker_role == "screen" else factory(context)
-
-    result = await make(model_factory=models).run(owner, case["id"])
-    if recommendation == "deepen":
-        assert len(result.findings.questions) == 26
-        assert result.screening.recommendation == "deepen"
-        assert len(calls) == 27 and calls[-1] == ("review", 1)
-    else:
-        assert not result.deep_assessment_completed
-        assert calls == []
-    assert service.state.get(owner, case["id"])["status"] == "completed"

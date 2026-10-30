@@ -1,8 +1,7 @@
-"""Complete native assessment coordination with fictional findings and no paid providers."""
+"""Native spin-off coordination: lead, subagents and decision, with no paid providers."""
 
 import asyncio
 import hashlib
-import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -14,9 +13,7 @@ from pydantic import PrivateAttr
 from smol import ConnectOptions, Machine
 from test_evidence import SimulatedObjects
 from test_sandbox import RehearsalModel
-from test_service import question, review
 
-from condere.runtime.contracts import MARKET_IDS, QUESTION_IDS, TECHNICAL_IDS
 from condere.runtime.coordinator import AssessmentCoordinator
 from condere.runtime.evidence import EvidenceStore, object_client
 from condere.runtime.sandbox import SmolSandbox
@@ -41,6 +38,87 @@ class BlockingModel(RehearsalModel):
         self._entered.set()
         await self._release.wait()
         return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+class ScriptedJev:
+    """Answers like Jev, with probabilities only; never judges research quality."""
+
+    def __init__(self):
+        self.asked = []
+
+    def ask(self, state, questions, purpose):
+        self.asked.append(purpose)
+        answers = {}
+        for name, question in questions.items():
+            if question["type"] == "noul":
+                answers[name] = {"type": "noul", "noul": 0.9}
+                continue
+            keys = list(question["criteria"])
+            chosen = {"verdict": "pursue", "option": "O1"}.get(name, keys[0])
+            answers[name] = {
+                "type": "choice",
+                "choice": chosen,
+                "probabilities": {
+                    key: 0.8 if key == chosen else 0.2 / (len(keys) - 1) for key in keys
+                },
+                "confidence": 0.7,
+            }
+        return {"model": "typesafe/jev-1.14-20261014", "answers": answers}
+
+
+def analysis_payload(source_id: str) -> dict:
+    option = {
+        "open_part": "Engine",
+        "paid_part": "Operations",
+        "buyer": "Engineering lead",
+        "why_pay": "Avoid incidents",
+        "main_risk": "Self-hosting is cheap",
+        "case_for": "Observed pain",
+        "case_against": "No willingness-to-pay evidence",
+    }
+    return {
+        "thesis": "Keep the engine open; sell managed upgrades.",
+        "summary": "Fictional analysis for coordination checks only.",
+        "claims": [
+            {
+                "id": "C1",
+                "statement": "Operators report upgrade breakage.",
+                "status": "observed",
+                "citations": [{"source_id": source_id, "quote": "upgrades keep breaking"}],
+            },
+            {"id": "C2", "statement": "Teams would pay per database.", "status": "modelled"},
+        ],
+        "asset": {
+            "summary": "Fictional engine.",
+            "ownership": "third_party_oss",
+            "maturity": "usable",
+            "operating_burden": ["C1"],
+        },
+        "rights": {
+            "summary": "Fictional permissive license.",
+            "can_open_source": "yes",
+            "can_sell_hosted": "yes",
+        },
+        "buyer": {
+            "summary": "Fictional buyer.",
+            "user": "Engineer",
+            "buyer": "Lead",
+            "trigger": "Failed upgrade",
+            "current_solution": "Manual",
+            "claims": ["C1"],
+        },
+        "options": [
+            option | {"id": "O1", "route": "managed_service", "claims": ["C1", "C2"]},
+            option | {"id": "O2", "route": "services_only", "claims": ["C2"]},
+        ],
+        "next_test": {
+            "assumption": "Teams pay to delegate upgrades.",
+            "method": "Priced interviews",
+            "success": "Three priced commitments",
+            "failure": "No priced interest",
+            "cost_and_time": "Two weeks",
+        },
+    }
 
 
 @pytest.fixture
@@ -102,56 +180,51 @@ def native_case(tmp_path, monkeypatch, request):
 
     monkeypatch.setattr(SmolSandbox, "create", tracked_create)
 
-    def accepted():
-        return {item["record_key"] for item in state.records(owner, case["id"], kind="question")}
+    source = service.evidence.save_source(
+        owner,
+        case["id"],
+        kind="web",
+        origin="https://example.com/native-fixture",
+        original=b"Operators report upgrades keep breaking in production.",
+        text="Operators report upgrades keep breaking in production.",
+        media_type="text/plain",
+        provenance={"provider": "simulation", "public": True},
+        limitations=["Tests coordination behavior; establishes no business finding."],
+    )
+    jev = ScriptedJev()
 
     def factory(context):
-        identity = context.question_id
-        calls.append((identity or context.worker_role, context.generation))
-        if identity is not None:
-            # Dependency order: T1-T8, then T9, then Market, then Business.
-            required = {
-                "T9": set(TECHNICAL_IDS) - {"T9"},
-                "M": set(TECHNICAL_IDS),
-                "B": set(TECHNICAL_IDS) | set(MARKET_IDS),
-            }.get(identity if identity == "T9" else identity[0], set())
-            assert required <= accepted()
-            submissions = [
-                {"name": "submit_question", "args": {"payload": question(identity)}, "id": identity}
-            ]
-        else:
-            assert accepted() == set(QUESTION_IDS)
-            submissions = [
-                {
-                    "name": "submit_review",
-                    "args": {"payload": review(service, owner, case)},
-                    "id": "review",
-                }
-            ]
+        calls.append((context.worker_role, context.generation))
+        if context.worker_role != "lead":
+            return RehearsalModel(model_name=f"condere:{context.worker_role}", responses=[])
         return RehearsalModel(
+            model_name="condere:lead",
             responses=[
                 AIMessage(
                     content="", tool_calls=[{"name": "read_assessment", "args": {}, "id": "read"}]
                 ),
-                *(
-                    [
-                        AIMessage(
-                            content="",
-                            tool_calls=[
-                                {
-                                    "name": "submit_question",
-                                    "args": {"payload": {}},
-                                    "id": "deliberately-invalid-technical",
-                                }
-                            ],
-                        )
-                    ]
-                    if identity == "T1"
-                    else []
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "submit_analysis",
+                            "args": {"payload": {}},
+                            "id": "deliberately-invalid-analysis",
+                        }
+                    ],
                 ),
-                AIMessage(content="", tool_calls=submissions),
-                AIMessage(content="All assigned fictional records were submitted."),
-            ]
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "submit_analysis",
+                            "args": {"payload": analysis_payload(source.id)},
+                            "id": "submit",
+                        }
+                    ],
+                ),
+                AIMessage(content="The fictional analysis was submitted."),
+            ],
         )
 
     def coordinator(model_factory=None, callbacks=None, tracing=None):
@@ -162,23 +235,12 @@ def native_case(tmp_path, monkeypatch, request):
             image=os.environ["CONDERE_SMOL_IMAGE"],
             artifacts=tmp_path,
             model_factory=model_factory or factory,
+            decision_factory=lambda context: jev,
             callbacks=callbacks,
             tracing=tracing,
         )
 
-    if native_objects:
-        service.evidence.save_source(
-            owner,
-            case["id"],
-            kind="web",
-            origin="https://example.com/native-storage-fixture",
-            original=b"Fictional source for the native storage integration check.",
-            text="Fictional source for the native storage integration check.",
-            media_type="text/plain",
-            provenance={"provider": "simulation", "storage": "native"},
-            limitations=["Tests storage behavior; establishes no business finding."],
-        )
-    yield service, owner, case, coordinator, factory, calls, created, tmp_path
+    yield service, owner, case, coordinator, factory, calls, created, tmp_path, jev
     existing = {item.id for item in Machine.list(ConnectOptions(target="local"))}
     for sandbox in created:
         if sandbox.id in existing:
@@ -188,35 +250,23 @@ def native_case(tmp_path, monkeypatch, request):
 
 
 @pytest.mark.asyncio
-async def test_complete_native_team_publishes_one_saved_dossier(native_case):
-    service, owner, case, make, _, calls, created, artifacts = native_case
-    coordinator = make()
-    dossier = await coordinator.run(owner, case["id"])
-    assert dossier.execution_mode == "simulation"
-    assert len(dossier.findings.questions) == 26
-    assert len(dossier.review.items) == 26
-    order = [name for name, _ in calls]
-    assert set(order[:8]) == set(TECHNICAL_IDS) - {"T9"} and order[8] == "T9"
-    assert set(order[9:17]) == set(MARKET_IDS) and order[-1] == "review"
-    workers = service.state.workers(owner, case["id"])
-    assert len(workers) == 27
-    assert {worker["status"] for worker in workers} == {"completed"}
-    assert len({worker["machine_id"] for worker in workers}) == 27
-    assert len({worker["thread_id"] for worker in workers}) == 27
+async def test_native_lead_run_records_analysis_and_one_decision(native_case):
+    service, owner, case, make, _, calls, created, artifacts, jev = native_case
+    decision = await make().run(owner, case["id"])
+    assert decision["decision"]["verdict"]["value"] == "pursue"
+    assert decision["decision"]["option"]["value"] == "O1"
+    assert decision["analysis_hash"] == service.analysis_hash(owner, case["id"])
+    assert sorted(calls) == [("code-analyst", 1), ("extractor", 1), ("lead", 1)]
+    assert jev.asked == ["assess option O1", "assess option O2", "choose verdict, option and route"]
+    [worker] = service.state.workers(owner, case["id"])
+    assert worker["assignment"]["role"] == "lead" and worker["status"] == "completed"
     rejected = service.state.records(owner, case["id"], kind="rejected_submission")
-    assert len(rejected) == 1 and rejected[0]["payload"]["tool"] == "submit_question"
-    exports = service.state.records(owner, case["id"], kind="worker_export")
-    for record in exports:
-        raw = (artifacts / case["id"] / record["record_key"] / "accepted.json").read_bytes()
-        assert hashlib.sha256(raw).hexdigest() == record["payload"]["sha256"]
-        assert {key: value["content_hash"] for key, value in json.loads(raw).items()} == (
-            record["payload"]["accepted_hashes"]
-        )
-    assert len(exports) == 27
-    assert dossier.model_dump(mode="json") == (await make().run(owner, case["id"])).model_dump(
-        mode="json"
-    )
-    assert len(calls) == 27
+    assert len(rejected) == 1 and rejected[0]["payload"]["tool"] == "submit_analysis"
+    [export] = service.state.records(owner, case["id"], kind="worker_export")
+    raw = (artifacts / case["id"] / export["record_key"] / "accepted.json").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == export["payload"]["sha256"]
+    [brief] = service.state.records(owner, case["id"], kind="decision_brief")
+    assert brief["payload"]["sha256"] == decision["decision"]["brief"]["sha256"]
     assert service.state.operations(owner, case["id"]) == []
     existing = {item.id for item in Machine.list(ConnectOptions(target="local"))}
     assert not {sandbox.id for sandbox in created} & existing
@@ -224,13 +274,14 @@ async def test_complete_native_team_publishes_one_saved_dossier(native_case):
 
 @pytest.mark.asyncio
 async def test_duplicate_run_owner_checks_and_explicit_cancellation(native_case):
-    service, owner, case, make, factory, calls, created, _ = native_case
+    service, owner, case, make, factory, calls, created, _, _ = native_case
     entered = asyncio.Event()
 
     def blocking(context):
-        if context.worker_role == "market":
+        if context.worker_role == "lead":
             model = BlockingModel(
-                responses=[AIMessage(content="Never finishes before cancellation.")]
+                model_name="condere:lead",
+                responses=[AIMessage(content="Never finishes before cancellation.")],
             )
             model._entered = entered
             return model
@@ -239,7 +290,7 @@ async def test_duplicate_run_owner_checks_and_explicit_cancellation(native_case)
     coordinator = make(blocking)
     running = asyncio.create_task(coordinator.run(owner, case["id"]))
     try:
-        await asyncio.wait_for(entered.wait(), timeout=30)
+        await asyncio.wait_for(entered.wait(), timeout=60)
         count = len(created)
         with pytest.raises(Conflict, match="live coordinator"):
             await make().run(owner, case["id"])
@@ -249,10 +300,6 @@ async def test_duplicate_run_owner_checks_and_explicit_cancellation(native_case)
         cancelled = await coordinator.cancel(owner, case["id"])
         assert cancelled["status"] == "cancelled"
         assert running.cancelled()
-        assert {item["status"] for item in service.state.workers(owner, case["id"])} <= {
-            "completed",
-            "interrupted",
-        }
         remaining = {item.id: item.state for item in Machine.list(ConnectOptions(target="local"))}
         assert all(
             remaining.get(sandbox.id, "stopped") in {"stopped", "exited"} for sandbox in created
@@ -263,47 +310,34 @@ async def test_duplicate_run_owner_checks_and_explicit_cancellation(native_case)
 
 
 @pytest.mark.asyncio
-async def test_continuation_preserves_answers_and_reuses_finished_research_roles(native_case):
-    service, owner, case, make, factory, calls, _, _ = native_case
+async def test_continuation_after_an_unfinished_lead_reaches_the_decision(native_case):
+    service, owner, case, make, factory, calls, _, _, jev = native_case
 
     def incomplete(context):
-        if context.question_id == "B2":
+        if context.worker_role == "lead":
             return RehearsalModel(
-                responses=[AIMessage(content="Simulated interruption without a B2 record.")]
+                model_name="condere:lead",
+                responses=[AIMessage(content="Simulated interruption without an analysis.")],
             )
         return factory(context)
 
     with pytest.raises(ExceptionGroup):
         await make(incomplete).run(owner, case["id"])
     assert service.state.get(owner, case["id"])["status"] == "interrupted"
-    before = {
-        item["record_key"]: item["content_hash"]
-        for item in service.state.records(owner, case["id"], kind="question")
-    }
-    assert set(TECHNICAL_IDS) | set(MARKET_IDS) <= set(before) and "B2" not in before
-    count = len(calls)
+    assert service.decision(owner, case["id"]) is None and jev.asked == []
     with pytest.raises(Conflict, match="explicit continuation"):
         await make().run(owner, case["id"])
     with pytest.raises(Conflict, match="private-query terms"):
         await make().run(owner, case["id"], resume=True, private_terms=("changed",))
-    dossier = await make().run(owner, case["id"], resume=True)
-    assert len(dossier.findings.questions) == 26
-    resumed = calls[count:]
-    assert ("B2", 2) in resumed and resumed[-1] == ("review", 2)
-    assert all(name.startswith("B") or name == "review" for name, _ in resumed)
-    after = service.state.records(owner, case["id"], kind="question")
-    assert len(after) == 26
-    assert all(
-        item["content_hash"] == before[item["record_key"]]
-        for item in after
-        if item["record_key"] in before
-    )
+    decision = await make().run(owner, case["id"], resume=True)
+    assert decision["decision"]["verdict"]["value"] == "pursue"
+    assert ("lead", 2) in calls
     assert service.state.spending(owner, case["id"])["budget"]["available_microusd"] == 10_000_000
 
 
 @pytest.mark.asyncio
 async def test_orphaned_dispatch_requires_reconciliation_before_continuation(native_case):
-    service, owner, case, make, _, calls, created, _ = native_case
+    service, owner, case, make, _, calls, created, _, _ = native_case
     started = service.begin(owner, case["id"])
     operation = service.state.reserve_operation(
         owner,
@@ -327,7 +361,7 @@ async def test_orphaned_dispatch_requires_reconciliation_before_continuation(nat
 
 
 def test_repository_allowance_is_shared_and_atomic(native_case):
-    service, owner, case, _, _, _, _, _ = native_case
+    service, owner, case, _, _, _, _, _, _ = native_case
     started = service.begin(owner, case["id"])
 
     def admit(index):

@@ -324,6 +324,13 @@ async def test_lead_delegates_to_a_subagent_and_submits_a_cited_analysis(
             option | {"id": "O1", "route": "managed_service", "claims": ["C1", "C2"]},
             option | {"id": "O2", "route": "services_only", "claims": ["C2"]},
         ],
+        "next_test": {
+            "assumption": "Teams pay to delegate upgrades.",
+            "method": "Priced interviews",
+            "success": "Three priced commitments",
+            "failure": "No priced interest",
+            "cost_and_time": "Two weeks",
+        },
     }
     code_model = CorrectingModel(
         model_name="condere:code",

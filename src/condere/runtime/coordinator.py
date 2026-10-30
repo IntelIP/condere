@@ -1,4 +1,4 @@
-"""One assessment: repository index, per-question Technical/Market/Business work, review."""
+"""One assessment: repository index, the lead analysis, then the Jev decision."""
 
 import asyncio
 import contextlib
@@ -15,6 +15,7 @@ from smol import ConnectOptions, Machine
 from condere.runtime.chatgpt_plan import PlanChatOpenAI, PlanCredentials, plan_model
 from condere.runtime.checkpoints import checkpoint_store
 from condere.runtime.contracts import BUSINESS_IDS, MARKET_IDS, QUESTIONS, TECHNICAL_IDS
+from condere.runtime.decision import decide
 from condere.runtime.indexing import (
     build_index,
     github_metadata,
@@ -24,8 +25,12 @@ from condere.runtime.indexing import (
     save_metadata,
 )
 from condere.runtime.providers import (
+    CLAUDE_HAIKU,
+    CLAUDE_OPUS,
     AccountedChatOpenAI,
+    ApifyResearch,
     ExaResearch,
+    JevDecisions,
     ProviderContext,
     accounted_model,
 )
@@ -36,7 +41,9 @@ from condere.runtime.state import Conflict
 from condere.runtime.tracing import Tracing, WorkerTrace
 from condere.runtime.workers import run_worker
 
-# Technical analysis of the code comes first; T9 synthesizes T1-T8 before Market and Business.
+# The spin-off flow: one lead (with its own subagents), then the decision step.
+LEAD_STAGES = (("lead",),)
+# Retained 26-question stages; no new plan selects them (see the spin-off goal).
 STAGE_ROLES = {"technical", "market", "business"}
 STAGES = (
     tuple("technical:" + identity for identity in TECHNICAL_IDS if identity != "T9"),
@@ -59,7 +66,9 @@ class AssessmentCoordinator:
         openrouter_key: str | None = None,
         plan_credentials: PlanCredentials | None = None,
         exa_key: str | None = None,
+        apify_token: str | None = None,
         model_factory=None,
+        decision_factory=None,
         callbacks: list | None = None,
         tracing: Tracing | None = None,
         concurrency: int = 3,
@@ -70,13 +79,20 @@ class AssessmentCoordinator:
             raise ValueError(
                 "Live coordination requires provider keys and the accounted model factory."
             )
-        if service.execution_mode == "simulation" and model_factory is None:
-            raise ValueError("Simulation requires an explicit non-provider model factory.")
+        if service.execution_mode == "live" and not openrouter_key:
+            raise ValueError("Live coordination needs OpenRouter for Claude subagents and Jev.")
+        if service.execution_mode == "simulation" and (
+            model_factory is None or decision_factory is None
+        ):
+            raise ValueError(
+                "Simulation requires explicit non-provider model and decision factories."
+            )
         self.service, self.state = service, service.state
         self.checkpoint_dsn, self.application_dsn = checkpoint_dsn, application_dsn
         self.image, self.artifacts = image, artifacts.resolve()
         self.artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._router_key, self._exa_key = openrouter_key, exa_key
+        self._router_key, self._exa_key, self._apify_token = openrouter_key, exa_key, apify_token
+        self._decision_factory = decision_factory
         # ChatGPT plan usage takes precedence when the operator signed in for it.
         self.plan_credentials = plan_credentials
         self._model_factory, self.callbacks = model_factory, callbacks or []
@@ -107,8 +123,7 @@ class AssessmentCoordinator:
             }
         )
         plan = {
-            "stages": ([["screen"]] if brief.get("analysis_depth") == "adaptive" else [])
-            + [list(stage) for stage in STAGES],
+            "stages": [list(stage) for stage in LEAD_STAGES],
             "repository_candidates": candidates,
             "private_terms": list(private_terms or ()),
         }
@@ -146,11 +161,12 @@ class AssessmentCoordinator:
             "market": ("question:T",),
             "business": ("question:T", "question:M"),
             "review": ("question:",),
+            "lead": (),
         }[role]
         return {
             key: record["content_hash"]
             for key, record in heads.items()
-            if (role != "screen" and key == "screen:main")
+            if (role not in {"screen", "lead"} and key == "screen:main")
             or (key.startswith(prefixes) and key != "question:" + question)
         }
 
@@ -270,6 +286,8 @@ class AssessmentCoordinator:
                                 return await asyncio.to_thread(
                                     self.service.finalize_screen, owner, assessment_id, generation
                                 )
+                if plan["stages"] == [list(stage) for stage in LEAD_STAGES]:
+                    return await asyncio.to_thread(self._decide, owner, assessment_id, generation)
                 creation = asyncio.create_task(
                     asyncio.to_thread(
                         SmolSandbox.create,
@@ -307,6 +325,32 @@ class AssessmentCoordinator:
                 raise
             finally:
                 self._tasks.pop((owner, assessment_id), None)
+
+    def _decide(self, owner, assessment_id, generation) -> dict:
+        """Jev decides from the saved analysis; an unchanged analysis reuses its decision."""
+        analysis_hash = self.service.analysis_hash(owner, assessment_id)
+        saved = self.service.decision(owner, assessment_id)
+        if saved is not None and saved["analysis_hash"] == analysis_hash:
+            return saved
+        context = ProviderContext(self.state, owner, assessment_id, generation, "decision")
+        jev = (
+            self._decision_factory(context)
+            if self._decision_factory
+            else JevDecisions(context, self._router_key)
+        )
+        try:
+            decision, brief = decide(
+                jev,
+                self.service.analysis(owner, assessment_id),
+                self.state.get(owner, assessment_id)["brief"]["original_input"],
+                assessment_id,
+            )
+        finally:
+            if hasattr(jev, "close"):
+                jev.close()
+        return self.service.record_decision(owner, assessment_id, decision, brief, analysis_hash)[
+            "payload"
+        ]
 
     def _worker_trace(self, worker, assessment_id, generation, brief, indexes):
         if self.tracing is None:
@@ -427,7 +471,7 @@ class AssessmentCoordinator:
             sandbox = await creation
             await asyncio.to_thread(sandbox.close)
             raise
-        succeeded, research, model = False, None, None
+        succeeded, research, social, model, subagents = False, None, None, None, []
         try:
             if sandbox.id != self.machine_name(worker):
                 raise Conflict(
@@ -462,6 +506,21 @@ class AssessmentCoordinator:
                     self._exa_key,
                     private_terms=tuple(plan["private_terms"]),
                 )
+                if role == "lead" and self._apify_token:
+                    social = ApifyResearch(
+                        context,
+                        self.service.evidence,
+                        self._apify_token,
+                        private_terms=tuple(plan["private_terms"]),
+                    )
+            if role == "lead":
+                for subagent, spec in (("code-analyst", CLAUDE_OPUS), ("extractor", CLAUDE_HAIKU)):
+                    ledger = ProviderContext(self.state, owner, assessment_id, generation, subagent)
+                    subagents.append(
+                        self._model_factory(ledger)
+                        if self._model_factory
+                        else accounted_model(ledger, self._router_key, spec=spec)
+                    )
             worker_trace = WorkerTrace()
             try:
                 with self._worker_trace(
@@ -481,6 +540,9 @@ class AssessmentCoordinator:
                         allowed_repositories=set(plan["repository_candidates"]),
                         question_id=question or None,
                         callbacks=self.callbacks,
+                        social=social,
+                        code_model=subagents[0] if subagents else None,
+                        extract_model=subagents[1] if subagents else None,
                     )
                     accepted = self.service._heads(
                         await asyncio.to_thread(self.state.records, owner, assessment_id)
@@ -548,9 +610,11 @@ class AssessmentCoordinator:
             succeeded = True
             return completed
         finally:
-            if research is not None:
-                research.close()
-            if isinstance(model, (AccountedChatOpenAI, PlanChatOpenAI)):
-                await asyncio.to_thread(model.root_client.close)
-                await model.root_async_client.close()
+            for adapter in (research, social):
+                if adapter is not None:
+                    adapter.close()
+            for item in (model, *subagents):
+                if isinstance(item, (AccountedChatOpenAI, PlanChatOpenAI)):
+                    await asyncio.to_thread(item.root_client.close)
+                    await item.root_async_client.close()
             await asyncio.to_thread(sandbox.close, delete=succeeded)

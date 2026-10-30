@@ -35,7 +35,7 @@ from condere.runtime.state import Conflict, NotFound, content_hash
 
 # Bounded correction: a worker may fix rejected submissions, but not loop indefinitely.
 MAX_REJECTED_SUBMISSIONS = 6
-SUBMISSION_TOOLS = {"submit_screen", "submit_question", "submit_review"}
+SUBMISSION_TOOLS = {"submit_screen", "submit_question", "submit_review", "submit_analysis"}
 
 
 class CorrectionLimitReached(RuntimeError):

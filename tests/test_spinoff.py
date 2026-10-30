@@ -17,6 +17,13 @@ from condere.runtime.spinoff import (
 
 ASSESSMENT = "00000000-0000-4000-8000-000000000108"
 SOURCE = "b" * 64
+NEXT_TEST = {
+    "assumption": "Teams pay to delegate upgrades.",
+    "method": "Priced interviews",
+    "success": "Three priced commitments",
+    "failure": "No priced interest",
+    "cost_and_time": "Two weeks",
+}
 
 
 def analysis(**changes) -> dict:
@@ -57,6 +64,7 @@ def analysis(**changes) -> dict:
             option("O1", "managed_service", ["C1", "C2"]),
             option("O2", "services_only", ["C2"]),
         ],
+        "next_test": NEXT_TEST,
     }
     return payload | changes
 
@@ -224,13 +232,7 @@ def result_payload() -> dict:
             key: {"summary": "Fictional.", "full": link(refs[key])}
             for key in ("asset", "rights", "buyer")
         },
-        "next_test": {
-            "assumption": "Teams pay to delegate upgrades.",
-            "method": "Priced interviews",
-            "success": "Three priced commitments",
-            "failure": "No priced interest",
-            "cost_and_time": "Two weeks",
-        },
+        "next_test": NEXT_TEST,
         "build_plan": {"option": "O1", "keep_open": ["K1"], "not_authorized": ["deployment"]},
         "open_questions": [],
         "claims": {"count": 3, "full": link(refs["claims"])},

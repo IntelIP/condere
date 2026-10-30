@@ -318,6 +318,42 @@ class AssessmentService:
             raise NotFound("No analysis has been submitted.")
         return Analysis.model_validate(records["analysis:main"]["payload"])
 
+    def _revise(self, owner, assessment_id, kind, payload) -> dict:
+        """Append the latest version of a coordinator-owned record, naming its predecessor."""
+        heads = self._heads(self.state.records(owner, assessment_id, kind=kind))
+        prior = heads.get(kind + ":main")
+        return self.state.append_record(
+            owner,
+            assessment_id,
+            kind,
+            "main",
+            payload,
+            supersedes_hash=None if prior is None else prior["content_hash"],
+        )
+
+    def analysis_hash(self, owner, assessment_id) -> str:
+        records = self._heads(self.state.records(owner, assessment_id, kind="analysis"))
+        if "analysis:main" not in records:
+            raise NotFound("No analysis has been submitted.")
+        return records["analysis:main"]["content_hash"]
+
+    def decision(self, owner, assessment_id) -> dict | None:
+        """The saved decision and the analysis hash it was made from, if any."""
+        records = self._heads(self.state.records(owner, assessment_id, kind="decision"))
+        return records["decision:main"]["payload"] if "decision:main" in records else None
+
+    def record_decision(self, owner, assessment_id, decision, brief: str, analysis_hash: str):
+        """Save the exact brief and the decision; a changed analysis supersedes both."""
+        self._revise(
+            owner, assessment_id, "decision_brief", {"text": brief, "sha256": decision.brief.sha256}
+        )
+        return self._revise(
+            owner,
+            assessment_id,
+            "decision",
+            {"analysis_hash": analysis_hash, "decision": decision.model_dump(mode="json")},
+        )
+
     def screening(self, owner, assessment_id) -> OpportunityScreen:
         records = self._heads(self.state.records(owner, assessment_id, kind="screen"))
         if "screen:main" not in records:
