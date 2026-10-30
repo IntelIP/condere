@@ -1,13 +1,16 @@
-"""Model judges for published spin-off results: Jev on every run, a stronger LLM to calibrate.
+"""Model judges for published spin-off results: Jev and GPT-6 Astra on every run, Opus to calibrate.
 
 Code evaluators (evaluation.py) check structure and evidence discipline; they cannot tell
 whether the analysis is useful. These judges answer the same rubric questions, from the same
-case file, as probabilities in [0, 1]. Jev is cheap enough to judge every run; the LLM judge
-(OpenEvals, Claude Opus) answers on a sample so Jev's agreement can be measured before its
-scores are trusted. Neither judge replaces the owner's review; both are operator evaluation,
-outside any assessment's spending ledger, and report OpenRouter's usage cost per call.
+case file, as probabilities in [0, 1]. Jev is cheap enough to judge every run. GPT-6 Astra
+answers them on the owner's ChatGPT plan (owner approval 2026-10-30, after a TypeSafe
+outage stopped Jev), so every run gets a second judge at no per-call charge and keeps a
+judge when Jev is unavailable. The OpenEvals Opus judge remains an optional paid check.
+None replaces the owner's review; all are operator evaluation, outside any assessment's
+spending ledger.
 """
 
+import json
 import re
 from collections.abc import Callable
 
@@ -15,6 +18,7 @@ import httpx
 
 JUDGE_JEV_MODEL = "typesafe/jev-1.14"
 JUDGE_LLM_MODEL = "anthropic/claude-opus-5.5"
+JUDGE_PLAN_MODEL = "gpt-6-astra"
 CASE_LIMIT = 31_000  # Jev's state stays under its ~32,000-byte long-context threshold.
 QUOTE_LIMIT = 600
 
@@ -239,9 +243,90 @@ def llm_rubric(judge_model, case: str, invoke: Callable | None = None) -> list[d
     return scores
 
 
-def agreement(jev_scores: list[dict], llm_scores: list[dict]) -> dict:
-    """Per-question gap between the judges; large gaps mark questions Jev cannot yet answer."""
-    jev = {item["key"].removeprefix("jev_"): item["score"] for item in jev_scores}
-    llm = {item["key"].removeprefix("llm_"): item["score"] for item in llm_scores}
-    gaps = {key: round(abs(jev[key] - llm[key]), 3) for key in RUBRIC if key in jev and key in llm}
+def agreement(
+    first: list[dict], second: list[dict], prefixes: tuple[str, str] = ("jev", "llm")
+) -> dict:
+    """Per-question gap between two judges; large gaps mark questions a judge cannot answer."""
+    one = {item["key"].removeprefix(prefixes[0] + "_"): item["score"] for item in first}
+    two = {item["key"].removeprefix(prefixes[1] + "_"): item["score"] for item in second}
+    gaps = {key: round(abs(one[key] - two[key]), 3) for key in RUBRIC if key in one and key in two}
     return {"gaps": gaps, "mean_gap": round(sum(gaps.values()) / len(gaps), 3) if gaps else None}
+
+
+class PlanJudge:
+    """GPT-6 Astra on the owner's ChatGPT plan, answering with a strict JSON schema."""
+
+    def __init__(self, credentials, *, model: str = JUDGE_PLAN_MODEL, client_factory=None):
+        from openai import OpenAI
+
+        from condere.runtime.chatgpt_plan import RESOURCE
+
+        self.model = model
+        self._client = client_factory or (
+            lambda: OpenAI(
+                api_key=credentials.access_token(),
+                base_url=RESOURCE,
+                max_retries=0,
+                timeout=httpx.Timeout(300, read=120, connect=15),
+            )
+        )
+
+    def scores(self, prompt: str, names: list[str]) -> dict:
+        schema = {
+            "type": "object",
+            "properties": {name: {"type": "number"} for name in names},
+            "required": names,
+            "additionalProperties": False,
+        }
+        text = ""
+        with self._client().responses.create(
+            model=self.model,
+            input=[{"role": "user", "content": prompt}],
+            store=False,
+            stream=True,
+            reasoning={"effort": "medium"},
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "scores",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+        ) as stream:
+            for event in stream:
+                if event.type == "response.output_text.delta":
+                    text += event.delta
+        answer = json.loads(text)
+        return {name: min(1.0, max(0.0, float(answer[name]))) for name in names}
+
+
+def plan_rubric(judge: PlanJudge, case: str) -> list[dict]:
+    """The rubric in one request: each answer is the probability the question's answer is yes."""
+    questions = "\n".join(f"- {key}: {question}" for key, question in RUBRIC.items())
+    answers = judge.scores(
+        "You judge an analysis of how to spin a business off a piece of software. Judge only "
+        "what the case file shows. For each question give the probability (0 to 1) that the "
+        f"answer is yes.\n\nQuestions:\n{questions}\n\n<case_file>\n{case}\n</case_file>",
+        list(RUBRIC),
+    )
+    return [{"key": f"astra_{key}", "score": round(answers[key], 3)} for key in RUBRIC]
+
+
+def plan_citations(judge: PlanJudge, claims: list[dict], batch: int = 30) -> dict:
+    """The quote-support question for every cited quote, in batches."""
+    pairs = citation_pairs(claims)
+    supported = {}
+    for start in range(0, len(pairs), batch):
+        chunk = pairs[start : start + batch]
+        supported |= judge.scores(
+            "For each item, give the probability (0 to 1) that the quoted source text, read on "
+            "its own, supports the whole statement, not merely the same topic or one part of "
+            "it.\n\n"
+            + "\n\n".join(
+                f"[{name}]\nStatement: {statement}\nQuoted source text: {quote}"
+                for name, statement, quote in chunk
+            ),
+            [name for name, _, _ in chunk],
+        )
+    return supported

@@ -1,6 +1,8 @@
 """Judges ask fixed rubric questions of a bounded case file and report probabilities."""
 
 import json
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -10,11 +12,14 @@ from condere.runtime.judges import (
     CASE_LIMIT,
     RUBRIC,
     JevJudge,
+    PlanJudge,
     agreement,
     case_file,
     citation_scores,
     jev_citations,
     jev_rubric,
+    plan_citations,
+    plan_rubric,
 )
 
 CLAIMS = [
@@ -81,3 +86,25 @@ def test_agreement_reports_the_gap_per_question():
         ],
     )
     assert result == {"gaps": {"thesis_specific": 0.2, "options_distinct": 0.0}, "mean_gap": 0.1}
+
+
+def test_plan_judge_answers_the_rubric_and_quotes_with_strict_json():
+    sent = []
+
+    class Client:
+        class responses:  # noqa: N801 - mirrors the SDK attribute
+            @staticmethod
+            @contextmanager
+            def create(**request):
+                sent.append(request)
+                names = request["text"]["format"]["schema"]["required"]
+                text = json.dumps({name: 0.9 if name != "C1_0" else 1.4 for name in names})
+                yield [SimpleNamespace(type="response.output_text.delta", delta=text)]
+
+    judge = PlanJudge(None, client_factory=Client)
+    rubric = {item["key"]: item["score"] for item in plan_rubric(judge, "case")}
+    assert (
+        set(rubric) == {f"astra_{key}" for key in RUBRIC} and rubric["astra_thesis_specific"] == 0.9
+    )
+    assert plan_citations(judge, CLAIMS) == {"C1_0": 1.0}  # Clamped to [0, 1].
+    assert all(item["model"] == "gpt-6-astra" and item["store"] is False for item in sent)
