@@ -1,0 +1,6 @@
+{
+  "image": "ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58",
+  "checked_at": "2026-10-22",
+  "purpose": "glibc Python/uv base for the bounded Graphify and Matplotlib analysis image",
+  "platforms": ["linux/arm64", "linux/amd64"]
+}

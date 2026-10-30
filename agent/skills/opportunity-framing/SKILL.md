@@ -17,12 +17,29 @@ user's decision. Do not turn a technology-first request into a different product
 without preserving that distinction. An existing business idea is an input to
 investigate, not evidence of demand.
 
-Prepare Technical and Market assignments with a shared decision context and
-separate working areas. Business synthesis consumes their findings. The required
-coverage remains Technical plus all 17 questions, even when only one question
-looks especially promising. Do not require the caller to coordinate the stages.
+For the screen assignment, compare up to four plausible customer/workflow
+hypotheses when the brief leaves the use case open. Include credible alternatives
+to the first implementation example. Prefer a smaller meaningful comparison to
+invented alternatives. Read firsthand problem accounts and existing workarounds;
+identify who experiences the consequence and who might pay. Buying roles remain
+hypotheses until supported. Find contrary cases, including satisfied self-builders.
 
-Stop framing when the investigation can proceed under the admitted scope and
-allowance. Return the preserved brief, known constraints, explicit hypotheses,
-unknown optional inputs, and decision to investigate. Human validation, outreach,
-and implementation remain proposed next actions.
+Research the uncertainty that can change the next decision. Use shared saved
+sources, inspect relevant passages and original context, then change search routes
+when results repeat background. A source count, a valid citation, or an attractive
+technical feature does not independently prove demand. Price pages describe an
+offer; commercial evidence must say what purchase or problem was actually observed.
+
+Submit an OpportunityScreen. Explain the choice among deepen, reframe, stop, and
+needs_customer_evidence. Missing public evidence is not proof that demand is absent.
+For each next check distinguish agent_research (executable with available public
+sources/tools), customer_input (missing facts only the user/customer can supply),
+and human_action (outreach, experiments, purchases or implementation). Do not defer
+a retrievable public fact to a customer or request approval between research steps.
+
+Choose deepen only when a selected opportunity has a named, executable deeper
+investigation that can materially change the recommendation. The coordinator then
+runs Market, Technical, Business and final review using this saved qualification;
+all 17 questions and Technical coverage remain required for that deep result.
+Other routes deliver the screen and its next actions without claiming deep
+assessment completion. No route authorizes external customer actions or building.

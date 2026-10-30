@@ -7,26 +7,103 @@ from pathlib import Path
 from condere.runtime.agent import method_version
 from condere.runtime.calculations import calculate
 from condere.runtime.contracts import (
-    CAPABILITY_CATEGORIES,
     QUESTION_IDS,
+    QUESTIONS,
+    STAGES,
     AssessmentFindings,
     IntakeBrief,
+    OpportunityScreen,
     QuestionAnswer,
-    TechnicalReport,
 )
 from condere.runtime.dossier import (
     AcceptedRecord,
     CheckedCalculation,
     Dossier,
     FinalReview,
+    ScreeningResult,
     render_json,
     render_markdown,
 )
-from condere.runtime.evidence import EvidenceStore, SourceDocument
+from condere.runtime.evidence import EvidenceError, EvidenceStore, SourceDocument
+from condere.runtime.reporting import render_figures, render_html
 from condere.runtime.state import AssessmentStore, Conflict, NotFound, content_hash
 
-POLICY_VERSION = "condere-mda-v1"
-READ_TOOLS = ["read_assessment", "list_sources", "read_source", "read_original", "calculate"]
+POLICY_VERSION = "condere-mda-v3"
+READ_TOOLS = [
+    "read_assessment",
+    "list_sources",
+    "search_saved_sources",
+    "read_source",
+    "read_original",
+    "calculate",
+]
+RESEARCH_TOOLS = {
+    "screen": ["search_public", "fetch_public_source", "inspect_repository"],
+    "technical": ["search_public", "fetch_public_source", "inspect_repository"],
+    "market": ["search_public", "fetch_public_source"],
+    "business": ["search_public", "fetch_public_source"],
+    "review": [],
+}
+SUBMIT_TOOL = {"screen": "submit_screen", "review": "submit_review"}
+SHARED_SKILLS = ["opportunity-framing"]
+ROLE_SKILLS = {
+    "screen": ["repository-index", "code-exploration"],
+    "review": ["evidence-reconciliation", "dossier-and-handoff", "visual-reporting"],
+}
+
+
+def output_keys(assignment: dict) -> list[str]:
+    """Records a worker must submit before it can finish."""
+    if assignment["role"] == "screen":
+        return ["screen:main"]
+    if assignment["role"] == "review":
+        return ["review:final"]
+    return ["question:" + identity for identity in assignment["question_ids"]]
+
+
+def spending_summary(spending: dict) -> dict:
+    """Totals for the dossier; per-operation records stay in the ledger and API status.
+
+    Embedding every operation made a 26-question live dossier ~10 MB (2026-10-28).
+    """
+    groups: dict[tuple[str, str], dict] = {}
+    plan_tokens = 0
+    for item in spending["operations"]:
+        group = groups.setdefault(
+            (item["kind"], item["state"]),
+            {
+                "kind": item["kind"],
+                "state": item["state"],
+                "count": 0,
+                "actual_microusd": 0,
+                "pending_microusd": 0,
+            },
+        )
+        group["count"] += 1
+        if item["actual_microusd"] is None:  # Unknown charges stay reserved, never zero.
+            group["pending_microusd"] += item["reserved_microusd"]
+        else:
+            group["actual_microusd"] += item["actual_microusd"]
+        if item["kind"] == "chatgpt_plan":
+            plan_tokens += ((item["cost_basis"] or {}).get("usage") or {}).get("total_tokens", 0)
+    return {
+        "budget": spending["budget"],
+        "operations": sorted(groups.values(), key=lambda group: (group["kind"], group["state"])),
+        "chatgpt_plan_tokens": plan_tokens,
+        "detail": "Per-operation records remain in the ledger and the assessment status API.",
+    }
+
+
+class _FixedTimeZip:
+    """Same saved result, same export bytes: entries carry a fixed timestamp, not the clock."""
+
+    def __init__(self, archive: zipfile.ZipFile):
+        self.archive = archive
+
+    def writestr(self, name: str, data) -> None:
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type, info.external_attr = zipfile.ZIP_DEFLATED, 0o600 << 16
+        self.archive.writestr(info, data)
 
 
 class AssessmentService:
@@ -76,53 +153,33 @@ class AssessmentService:
         assessment_id: str,
         generation: int,
         role: str,
-        *,
-        required_capabilities: list[dict] | None = None,
+        question_id: str | None = None,
     ) -> dict:
+        """One worker per question (or the screen/review); its skills and tools are narrow."""
         self._compatible(self.state.get(owner, assessment_id))
-        if role not in {"technical", "market", "business", "review"}:
+        if role not in {"screen", "review", *STAGES}:
             raise ValueError("Unknown private worker role.")
-        question_ids = [
-            identity
-            for identity in QUESTION_IDS
-            if role == "review"
-            or identity.startswith("M" if role == "market" else "B")
-            and role in {"market", "business"}
-        ]
-        requirements = required_capabilities or [
-            dict(scenario="primary", category=category, name=category)
-            for category in sorted(CAPABILITY_CATEGORIES)
-        ]
-        if role != "technical" and required_capabilities is not None:
-            raise ValueError("Capability requirements belong to the Technical assignment.")
-        if any(
-            set(item) != {"scenario", "category", "name"}
-            or item["category"] not in CAPABILITY_CATEGORIES
-            or not item["scenario"]
-            or not item["name"]
-            for item in requirements
+        if (role in STAGES) != (question_id is not None) or (
+            question_id is not None and question_id not in STAGES[role]
         ):
-            raise ValueError("Every capability requirement needs a scenario, category, and name.")
-        tools = READ_TOOLS + (
-            []
-            if role == "review"
-            else ["search_public", "fetch_public_source", "inspect_repository"]
+            raise ValueError("Question workers need one question from their own stage.")
+        question_ids = (
+            list(QUESTION_IDS) if role == "review" else [question_id] if question_id else []
         )
-        tools += [
-            "submit_review"
-            if role == "review"
-            else "submit_technical"
-            if role == "technical"
-            else "submit_question"
-        ]
+        skills = SHARED_SKILLS + (
+            QUESTIONS[question_id]["skills"] if question_id else ROLE_SKILLS[role]
+        )
+        key = f"{role}:{question_id}" if question_id else role
         assignment = dict(
             role=role,
             question_ids=question_ids,
-            required_capabilities=requirements if role == "technical" else [],
-            permitted_tools=tools,
-            output_path=f"/workspace/results/{role}.json",
+            skills=list(dict.fromkeys(skills)),
+            permitted_tools=READ_TOOLS
+            + RESEARCH_TOOLS[role]
+            + [SUBMIT_TOOL.get(role, "submit_question")],
+            output_path=f"/workspace/results/{key.replace(':', '-')}.json",
         )
-        return self.state.assign_worker(owner, assessment_id, generation, role, assignment)
+        return self.state.assign_worker(owner, assessment_id, generation, key, assignment)
 
     def _worker(
         self,
@@ -155,36 +212,64 @@ class AssessmentService:
             raise Conflict("The worker does not have this running assignment.")
         return worker
 
-    def submit_technical(
-        self,
-        owner: str,
-        assessment_id: str,
-        generation: int,
-        worker_id: str,
-        payload: dict,
-        *,
-        supersedes_hash: str | None = None,
+    def submit_screen(
+        self, owner, assessment_id, generation, worker_id, payload, *, supersedes_hash=None
     ) -> dict:
-        worker = self._worker(owner, assessment_id, generation, worker_id, "technical")
-        report = TechnicalReport.model_validate(payload)
-        actual = {(item.scenario, item.category, item.name) for item in report.capabilities}
-        required = {
-            (item["scenario"], item["category"], item["name"])
-            for item in worker["assignment"]["required_capabilities"]
-        }
-        if not required.issubset(actual):
-            raise Conflict("Technical output omitted a named capability from its assignment.")
-        self.evidence.verify_findings(owner, assessment_id, report)
+        self._worker(owner, assessment_id, generation, worker_id, "screen")
+        if self.state.get(owner, assessment_id)["brief"].get("analysis_depth") != "adaptive":
+            raise Conflict("Screening belongs to an adaptive assessment.")
+        screen = OpportunityScreen.model_validate(
+            self.evidence.resolve_citations(owner, assessment_id, payload)
+        )
+        self.evidence.verify_findings(owner, assessment_id, screen)
         return self.state.append_record(
             owner,
             assessment_id,
-            "technical",
+            "screen",
             "main",
-            report.model_dump(mode="json"),
+            screen.model_dump(mode="json"),
             supersedes_hash=supersedes_hash,
             generation=generation,
             worker_id=worker_id,
         )
+
+    def screening(self, owner, assessment_id) -> OpportunityScreen:
+        records = self._heads(self.state.records(owner, assessment_id, kind="screen"))
+        if "screen:main" not in records:
+            raise NotFound("No opportunity screen has been submitted.")
+        return OpportunityScreen.model_validate(records["screen:main"]["payload"])
+
+    def finalize_screen(self, owner, assessment_id, generation) -> ScreeningResult:
+        assessment = self.state.get(owner, assessment_id)
+        self._compatible(assessment)
+        screen = self.screening(owner, assessment_id)
+        if screen.recommendation == "deepen":
+            raise Conflict("The selected deeper investigation must finish before delivery.")
+        self.evidence.verify_findings(owner, assessment_id, screen)
+        heads = self._heads(self.state.records(owner, assessment_id))
+        result = ScreeningResult(
+            assessment_id=assessment_id,
+            execution_mode=self.execution_mode,
+            created_at=datetime.now(UTC),
+            brief=IntakeBrief.model_validate(assessment["brief"]),
+            screen=screen,
+            sources=[
+                SourceDocument.model_validate(item["payload"])
+                for item in heads.values()
+                if item["kind"] == "source"
+            ],
+            spending=spending_summary(self.state.spending(owner, assessment_id)),
+            method_version=assessment["method_version"],
+            policy_version=assessment["policy_version"],
+        )
+        self.state.publish_dossier(
+            owner,
+            assessment_id,
+            generation,
+            result.model_dump(mode="json"),
+            {"screen:main": heads["screen:main"]["content_hash"]},
+        )
+        return result
 
     def submit_question(
         self,
@@ -197,10 +282,13 @@ class AssessmentService:
         supersedes_hash: str | None = None,
     ) -> dict:
         worker = self._worker(owner, assessment_id, generation, worker_id)
-        answer = QuestionAnswer.model_validate(payload)
-        if answer.question_id not in worker["assignment"]["question_ids"] or worker["assignment"][
-            "role"
-        ] not in {"market", "business"}:
+        answer = QuestionAnswer.model_validate(
+            self.evidence.resolve_citations(owner, assessment_id, payload)
+        )
+        if (
+            answer.question_id not in worker["assignment"]["question_ids"]
+            or worker["assignment"]["role"] not in STAGES
+        ):
             raise Conflict("This question is outside the worker's assignment.")
         self.evidence.verify_findings(owner, assessment_id, answer)
         return self.state.append_record(
@@ -218,13 +306,10 @@ class AssessmentService:
         self, owner: str, assessment_id: str
     ) -> tuple[AssessmentFindings, dict[str, dict]]:
         heads = self._heads(self.state.records(owner, assessment_id))
-        needed = {"technical:main", *("question:" + identity for identity in QUESTION_IDS)}
+        needed = {"question:" + identity for identity in QUESTION_IDS}
         if not needed.issubset(heads):
-            raise Conflict(
-                "All Technical and 17 question records are required before final review."
-            )
+            raise Conflict("All 26 Technical, Market and Business records precede final review.")
         findings = AssessmentFindings(
-            technical=TechnicalReport.model_validate(heads["technical:main"]["payload"]),
             questions=[
                 QuestionAnswer.model_validate(heads["question:" + identity]["payload"])
                 for identity in QUESTION_IDS
@@ -237,11 +322,9 @@ class AssessmentService:
         return {
             "findings": findings.model_dump(mode="json"),
             "reviewed_hashes": {
-                "technical" if key == "technical:main" else key.removeprefix("question:"): record[
-                    "content_hash"
-                ]
+                key.removeprefix("question:"): record["content_hash"]
                 for key, record in heads.items()
-                if record["kind"] in {"technical", "question"}
+                if record["kind"] == "question"
             },
         }
 
@@ -254,35 +337,18 @@ class AssessmentService:
         review: FinalReview,
     ) -> None:
         for item in review.items:
-            key = "technical:main" if item.target == "technical" else "question:" + item.target
+            key = "question:" + item.target
             if heads[key]["content_hash"] != item.reviewed_hash:
                 raise Conflict("The review does not cover the current accepted version.")
             for citation in item.citations:
                 self.evidence.original(owner, assessment_id, citation.source_id)
                 self.evidence.verify_citation(owner, assessment_id, citation)
-            statements = (
-                list(findings.technical.findings.values())
-                if item.target == "technical"
-                else [
-                    next(
-                        answer for answer in findings.questions if answer.question_id == item.target
-                    )
-                ]
+            answer = next(
+                answer for answer in findings.questions if answer.question_id == item.target
             )
-            unknown = any(statement.availability == "unavailable" for statement in statements)
-            if item.target == "technical":
-                unknown |= any(
-                    capability.status == "unavailable"
-                    for capability in findings.technical.capabilities
-                )
-                unknown |= any(
-                    metric.basis == "unavailable" for metric in findings.technical.metrics
-                )
-            else:
-                unknown |= any(
-                    calculate(calculation).value is None
-                    for calculation in statements[0].calculations
-                )
+            unknown = answer.availability == "unavailable" or any(
+                calculate(calculation).value is None for calculation in answer.calculations
+            )
             if item.status == "supported" and unknown:
                 raise Conflict(
                     "Unavailable evidence must remain qualified or insufficient in review."
@@ -301,7 +367,9 @@ class AssessmentService:
     ) -> dict:
         self._worker(owner, assessment_id, generation, worker_id, "review")
         findings, heads = self.findings(owner, assessment_id)
-        review = FinalReview.model_validate(payload)
+        review = FinalReview.model_validate(
+            self.evidence.resolve_citations(owner, assessment_id, payload)
+        )
         self._verify_review(owner, assessment_id, findings, heads, review)
         return self.state.append_record(
             owner,
@@ -320,14 +388,7 @@ class AssessmentService:
         worker = self._worker(owner, assessment_id, generation, worker_id, allow_completed=True)
         if worker["status"] == "completed":
             return worker
-        role = worker["assignment"]["role"]
-        keys = (
-            ["technical:main"]
-            if role == "technical"
-            else ["review:final"]
-            if role == "review"
-            else ["question:" + identity for identity in worker["assignment"]["question_ids"]]
-        )
+        keys = output_keys(worker["assignment"])
         heads = self._heads(self.state.records(owner, assessment_id))
         if any(key not in heads for key in keys):
             raise Conflict("The worker has not submitted all assigned outputs.")
@@ -342,7 +403,7 @@ class AssessmentService:
             },
         )
 
-    def finalize(self, owner: str, assessment_id: str, generation: int) -> Dossier:
+    def finalize(self, owner: str, assessment_id: str, generation: int, *, sandbox=None) -> Dossier:
         assessment = self.state.get(owner, assessment_id)
         if assessment["status"] == "completed":
             return self.report(owner, assessment_id)
@@ -358,13 +419,6 @@ class AssessmentService:
             for answer in findings.questions
             for item in answer.calculations
         ]
-        calculations += [
-            CheckedCalculation(
-                target="technical:" + metric.name, result=calculate(metric.calculation)
-            )
-            for metric in findings.technical.metrics
-            if metric.calculation
-        ]
         dossier = Dossier(
             assessment_id=assessment_id,
             execution_mode=self.execution_mode,
@@ -372,6 +426,7 @@ class AssessmentService:
             brief=IntakeBrief.model_validate(assessment["brief"]),
             findings=findings,
             review=review,
+            screening=(self.screening(owner, assessment_id) if "screen:main" in heads else None),
             record_history=[
                 AcceptedRecord(
                     kind=item["kind"],
@@ -382,7 +437,7 @@ class AssessmentService:
                     payload=item["payload"],
                 )
                 for item in history
-                if item["kind"] in {"technical", "question", "review"}
+                if item["kind"] in {"screen", "question", "review"}
             ],
             sources=[
                 SourceDocument.model_validate(item["payload"])
@@ -390,28 +445,41 @@ class AssessmentService:
                 if item["kind"] == "source"
             ],
             calculations=calculations,
-            spending=self.state.spending(owner, assessment_id),
+            spending=spending_summary(self.state.spending(owner, assessment_id)),
             method_version=assessment["method_version"],
             policy_version=assessment["policy_version"],
         )
+        if sandbox is not None:
+            files = render_figures(dossier, sandbox)
+            for asset in dossier.assets:
+                digest = self.evidence._put_object(
+                    assessment_id, files[asset.path], asset.media_type
+                )
+                if digest != asset.sha256:
+                    raise EvidenceError("The persisted report artifact changed identity.")
         expected = {
             key: record["content_hash"]
             for key, record in heads.items()
-            if record["kind"] in {"technical", "question", "review"}
+            if record["kind"] in {"screen", "question", "review"}
         }
         self.state.publish_dossier(
             owner, assessment_id, generation, dossier.model_dump(mode="json"), expected
         )
         return dossier
 
-    def report(self, owner: str, assessment_id: str) -> Dossier:
+    def report(self, owner: str, assessment_id: str) -> Dossier | ScreeningResult:
         records = self.state.records(owner, assessment_id, kind="dossier")
         if not records:
             raise NotFound(
                 "A final dossier has not been delivered; accepted partial records remain available."
             )
         saved = self._heads(records)["dossier:final"]
-        return Dossier.model_validate(saved["payload"])
+        model = (
+            ScreeningResult
+            if saved["payload"].get("schema_version") == "condere.screen.v1"
+            else Dossier
+        )
+        return model.model_validate(saved["payload"])
 
     def export(self, owner: str, assessment_id: str, target: Path) -> Path:
         dossier = self.report(owner, assessment_id)
@@ -420,9 +488,16 @@ class AssessmentService:
             with target.open("xb") as output:
                 created = True
                 target.chmod(0o600)
-                with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+                    archive = _FixedTimeZip(zipped)
                     archive.writestr("assessment.json", render_json(dossier))
                     archive.writestr("assessment.md", render_markdown(dossier))
+                    archive.writestr("assessment.html", render_html(dossier))
+                    for asset in dossier.assets:
+                        archive.writestr(
+                            asset.path,
+                            self.evidence._read_object(assessment_id, asset.sha256, asset.bytes),
+                        )
                     for source in dossier.sources:
                         archive.writestr(
                             f"sources/{source.id}.original",

@@ -226,7 +226,7 @@ def create_server(client: AssessmentClient) -> FastMCP:
     async def read_report(
         assessment_id: str, format: Literal["json", "markdown"] = "json"
     ) -> dict[str, Any]:
-        """Retrieve the full saved dossier: Technical findings, all 17 answers and handoff."""
+        """Retrieve the full saved dossier: all 26 T/M/B answers, review and handoff."""
         return await client.request(
             "GET", f"/{segment(assessment_id)}/report", params={"format": format}
         )

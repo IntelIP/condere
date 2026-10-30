@@ -14,10 +14,11 @@ from condere.runtime.contracts import (
     Citation,
     Finding,
     IntakeBrief,
+    OpportunityScreen,
 )
 from condere.runtime.evidence import SourceDocument
 
-REVIEW_TARGETS = {"technical", *QUESTION_IDS}
+REVIEW_TARGETS = set(QUESTION_IDS)
 
 
 class ReviewItem(Record):
@@ -28,10 +29,22 @@ class ReviewItem(Record):
     qualifications: list[Text] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def plain_question_target(cls, value):
+        # read_assessment keys accepted records as "question:T1"; reviewers reasonably reuse it.
+        if isinstance(value, dict) and str(value.get("target", "")).startswith("question:"):
+            return value | {"target": value["target"].removeprefix("question:")}
+        return value
+
     @model_validator(mode="after")
     def explicit_qualification(self) -> Self:
         if self.target not in REVIEW_TARGETS:
-            raise ValueError("Review only Technical and the 17 commercialization questions.")
+            raise ValueError(
+                f"Unknown review target {self.target!r}; use a question ID: "
+                + ", ".join(QUESTION_IDS)
+                + "."
+            )
         if self.status != "supported" and not self.qualifications:
             raise ValueError("Qualified or insufficient findings need explicit qualifications.")
         return self
@@ -57,7 +70,7 @@ class DevelopmentHandoff(Record):
 
 
 class FinalReview(Record):
-    items: list[ReviewItem] = Field(min_length=18, max_length=18)
+    items: list[ReviewItem] = Field(min_length=26, max_length=26)
     recommendation: Literal["test_assumption", "change_direction", "stop", "insufficient_evidence"]
     summary: Text
     decision_reasons: list[Text] = Field(min_length=1)
@@ -89,8 +102,23 @@ class CheckedCalculation(Record):
     result: CalculationResult
 
 
+class ReportAsset(Record):
+    path: str = Field(pattern=r"^figures/[a-z0-9-]+\.(png|svg|json|csv)$")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: int = Field(ge=0, le=4 * 1024 * 1024)
+    media_type: Literal["image/png", "image/svg+xml", "application/json", "text/csv"]
+
+
+class ReportFigure(Record):
+    id: str = Field(pattern=r"^[a-z0-9-]+$")
+    title: str
+    caption: str
+    source_ids: list[str]
+    paths: dict[str, str]
+
+
 class Dossier(Record):
-    schema_version: Literal["condere.assessment.v1"] = "condere.assessment.v1"
+    schema_version: Literal["condere.assessment.v2"] = "condere.assessment.v2"
     assessment_id: str
     execution_mode: Literal["simulation", "live"]
     created_at: AwareDatetime
@@ -103,6 +131,25 @@ class Dossier(Record):
     spending: dict
     method_version: str
     policy_version: str
+    screening: OpportunityScreen | None = None
+    figures: list[ReportFigure] = Field(default_factory=list)
+    assets: list[ReportAsset] = Field(default_factory=list)
+
+
+class ScreeningResult(Record):
+    schema_version: Literal["condere.screen.v1"] = "condere.screen.v1"
+    assessment_id: str
+    execution_mode: Literal["simulation", "live"]
+    created_at: AwareDatetime
+    brief: IntakeBrief
+    screen: OpportunityScreen
+    sources: list[SourceDocument]
+    spending: dict
+    method_version: str
+    policy_version: str
+    deep_assessment_completed: Literal[False] = False
+    human_review_required: Literal[True] = True
+    assets: list[ReportAsset] = Field(default_factory=list)
 
 
 def _bullets(values: list[str]) -> str:
@@ -126,8 +173,69 @@ def _finding(finding: Finding) -> list[str]:
     return lines
 
 
-def render_markdown(dossier: Dossier) -> str:
+def render_markdown(dossier: Dossier | ScreeningResult) -> str:
+    if isinstance(dossier, ScreeningResult):
+        screen = dossier.screen
+        lines = [
+            "# Condere opportunity screen",
+            "",
+            screen.summary,
+            "",
+            f"Recommendation: **{screen.recommendation.replace('_', ' ')}**.",
+            "Qualification is complete. A full Technical/Market/Business assessment has not run.",
+            "Proposed customer actions and implementation require human review.",
+            "",
+            "## Decision reasons",
+            "",
+            _bullets(screen.decision_reasons),
+            "",
+            "## What can be done next",
+            "",
+        ]
+        if dossier.execution_mode == "simulation":
+            lines.insert(2, "**Simulation. These records do not establish customer demand.**\n")
+        for check in screen.next_checks:
+            lines += [
+                f"### {check.question}",
+                "",
+                f"Execution: **{check.execution.replace('_', ' ')}**.",
+                "",
+                check.action,
+                "",
+                f"Decision impact: {check.decision_impact}",
+                "",
+            ]
+        lines += ["## Material gaps", "", _bullets(screen.material_gaps), ""]
+        for candidate in screen.candidates:
+            lines += [f"## {candidate.name}", "", f"Possible customer: {candidate.customer}", ""]
+            for name in ("problem", "commercial_evidence", "alternatives"):
+                lines += [
+                    f"### {name.replace('_', ' ').title()}",
+                    "",
+                    *_finding(getattr(candidate, name)),
+                ]
+        lines += ["## Contrary evidence", ""]
+        for finding in screen.contrary_evidence:
+            lines += _finding(finding)
+        lines += ["## Saved sources", ""]
+        lines += [
+            f"- [{source.origin}]({source.origin}) — `{source.id}`." for source in dossier.sources
+        ]
+        lines += ["", "## Recorded usage", "", json.dumps(dossier.spending, sort_keys=True), ""]
+        return "\n".join(lines)
     review = dossier.review
+    figures = []
+    for figure in dossier.figures:
+        figures += [
+            f"### {figure.title}",
+            "",
+            f"![{figure.title}]({figure.paths['png']})",
+            "",
+            figure.caption,
+            "",
+            f"[Figure data]({figure.paths['data']}) · [Scalable figure]({figure.paths['svg']})",
+            "",
+        ]
     lines = ["# Condere opportunity assessment", "", review.summary, ""]
     if dossier.execution_mode == "simulation":
         lines += [
@@ -138,6 +246,7 @@ def render_markdown(dossier: Dossier) -> str:
         f"Recommendation: **{review.recommendation.replace('_', ' ')}**.",
         "Human review is required. The handoff proposes work; it does not authorize execution.",
         "",
+        *figures,
         "## Original intent",
         "",
         dossier.brief.original_input,
@@ -154,38 +263,15 @@ def render_markdown(dossier: Dossier) -> str:
         "",
         _bullets(review.contrary_evidence),
         "",
-        "## Technical findings",
-        "",
     ]
     reviews = {item.target: item for item in review.items}
-    for name, finding in dossier.findings.technical.findings.items():
-        lines += [f"### {name.replace('_', ' ').title()}", "", *_finding(finding)]
-    lines += [
-        "Technical review qualifications:",
-        "",
-        _bullets(reviews["technical"].qualifications),
-        "",
-        "## Capability records",
-        "",
-    ]
-    for capability in dossier.findings.technical.capabilities:
-        lines += [
-            f"- {capability.scenario} / {capability.category} / {capability.name}: "
-            f"**{capability.status}**. "
-            f"{capability.finding.conclusion} Value: {capability.value or 'unavailable'}."
-        ]
-    if dossier.findings.technical.metrics:
-        lines += ["", "## Technical metrics", ""]
-        for metric in dossier.findings.technical.metrics:
-            lines += [
-                f"- {metric.subject} / {metric.scenario} / {metric.name}: "
-                f"{metric.value if metric.value is not None else 'unavailable'} {metric.unit} "
-                f"({metric.basis}; version {metric.product_version})."
-            ]
-    lines += ["", "## Commercialization questions", ""]
     questions = {answer.question_id: answer for answer in dossier.findings.questions}
+    stage = None
     for identity in QUESTION_IDS:
         answer = questions[identity]
+        if QUESTIONS[identity]["stage"] != stage:
+            stage = QUESTIONS[identity]["stage"]
+            lines += [f"## {stage.title()} questions", ""]
         lines += [f"### {identity}: {QUESTIONS[identity]['question']}", "", *_finding(answer)]
         for name, value in answer.details.items():
             lines += [
@@ -251,7 +337,12 @@ def render_markdown(dossier: Dossier) -> str:
         "",
         f"Recorded: ${Decimal(money['settled_microusd']) / 1_000_000}. "
         f"Still reserved or unresolved: ${Decimal(money['pending_microusd']) / 1_000_000}. "
-        f"Campaign cap: ${Decimal(money['cap_microusd']) / 1_000_000}.",
+        "Campaign cap: "
+        + (
+            "none; every charge is recorded."
+            if money["cap_microusd"] is None
+            else f"${Decimal(money['cap_microusd']) / 1_000_000}."
+        ),
         "Reservations are not invoices. The JSON retains cost bases and unresolved liabilities.",
         "",
         f"Assessment: `{dossier.assessment_id}`. Saved: {dossier.created_at.isoformat()}.",

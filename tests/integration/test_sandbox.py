@@ -197,7 +197,9 @@ async def test_deep_agent_uses_real_sandbox_and_discovers_all_skills(sandboxes):
     prompt = "\n".join(model.seen_system)
     for skill in (
         "opportunity-framing",
-        "technical-diligence",
+        "repository-index",
+        "architecture-analysis",
+        "managed-offering-design",
         "market-evidence",
         "business-strategy",
         "evidence-reconciliation",

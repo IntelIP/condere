@@ -17,7 +17,8 @@ from pydantic import Field
 from starlette.background import BackgroundTask
 
 from condere.runtime.calculations import Record
-from condere.runtime.contracts import QUESTION_IDS, TECHNICAL_FIELDS, IntakeBrief
+from condere.runtime.chatgpt_plan import USAGE_URL
+from condere.runtime.contracts import QUESTION_IDS, STAGES, IntakeBrief
 from condere.runtime.dossier import render_markdown
 from condere.runtime.evidence import EvidenceError
 from condere.runtime.service import AssessmentService
@@ -130,7 +131,15 @@ def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[st
             "policy_version": service.policy_version,
             "method_version": service.method_version,
             "questions": QUESTION_IDS,
-            "technical_topics": sorted(TECHNICAL_FIELDS),
+            "stages": STAGES,
+            "analysis_depths": ["adaptive", "deep"],
+            "result_schemas": ["condere.screen.v1", "condere.assessment.v2"],
+            # Clients show "Using ChatGPT plan" with a Manage usage link when this is set.
+            "model_billing": (
+                {"type": "chatgpt_plan", "manage_usage": USAGE_URL}
+                if getattr(coordinator, "plan_credentials", None) is not None
+                else {"type": "provider_account"}
+            ),
         }
 
     @app.post(PREFIX, status_code=202)

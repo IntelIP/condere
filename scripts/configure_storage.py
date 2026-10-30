@@ -4,7 +4,7 @@ import json
 import secrets
 from urllib.parse import quote, urlsplit
 
-from configure_langfuse import doppler
+from doppler_config import doppler
 
 
 def main() -> None:

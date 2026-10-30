@@ -7,17 +7,14 @@ from pydantic import ValidationError
 
 from condere.runtime.calculations import Calculation, CalculationInput, calculate
 from condere.runtime.contracts import (
-    CAPABILITY_CATEGORIES,
     QUESTION_IDS,
     QUESTIONS,
-    TECHNICAL_FIELDS,
+    STAGES,
     AssessmentFindings,
     Citation,
     Finding,
     IntakeBrief,
-    Metric,
     QuestionAnswer,
-    TechnicalReport,
 )
 
 
@@ -37,7 +34,7 @@ def test_citations_supply_optional_source_ids_without_accepting_an_explicit_mism
         ],
     }
     assert Finding.model_validate(payload).source_ids == ["b" * 64]
-    with pytest.raises(ValidationError, match="Every cited source"):
+    with pytest.raises(ValidationError, match="Listed without a citation"):
         Finding.model_validate(payload | {"source_ids": []})
 
 
@@ -66,6 +63,7 @@ def economics(scenario="base"):
 
 
 def answer(question_id, *, unavailable=False):
+    unavailable = unavailable or "modelled" not in QUESTIONS[question_id]["allowed_bases"]
     return QuestionAnswer(
         question_id=question_id,
         conclusion="Fictional hypothesis for contract checks only.",
@@ -83,29 +81,6 @@ def answer(question_id, *, unavailable=False):
         if question_id == "B3" and not unavailable
         else [],
         next_action="Human review of missing evidence; do not contact or build.",
-    )
-
-
-def technical():
-    missing = dict(
-        conclusion="Not established by this fixture.",
-        availability="unavailable",
-        limitations=["No native research was run."],
-    )
-    return TechnicalReport(
-        findings={field: missing for field in TECHNICAL_FIELDS},
-        capabilities=[
-            dict(
-                scenario="fixture",
-                category=category,
-                name="required-" + category,
-                status="unavailable",
-                value=None,
-                finding=missing,
-            )
-            for category in sorted(CAPABILITY_CATEGORIES)
-        ],
-        inspection_limitations=["This fixture does not inspect a repository."],
     )
 
 
@@ -131,29 +106,42 @@ def test_intake_preserves_intent_without_requiring_customer_assumptions(brief):
         IntakeBrief.model_validate(brief | {"owner_id": "someone-else"})
 
 
+def test_technical_questions_cover_the_open_core_hosting_thesis():
+    assert STAGES["technical"] == tuple(f"T{index}" for index in range(1, 10))
+    assert [QUESTIONS[key]["stage"] for key in QUESTION_IDS[:9]] == ["technical"] * 9
+    assert {"hosting_value"} <= set(QUESTIONS["T5"]["required_fields"])
+    assert {"hosting_rights"} <= set(QUESTIONS["T6"]["required_fields"])
+    assert {"open_core_boundary"} <= set(QUESTIONS["T9"]["required_fields"])
+    for key in STAGES["technical"]:
+        assert QUESTIONS[key]["skills"][1:] == ["repository-index", "code-exploration"]
+    # Architecture and applications can be proposed for an idea with no repository.
+    assert (
+        not QUESTIONS["T1"]["allow_unavailable"] and "modelled" in QUESTIONS["T1"]["allowed_bases"]
+    )
+    assert "modelled" not in QUESTIONS["T2"]["allowed_bases"]
+
+
 def test_full_coverage_preserves_allowed_unknowns_and_rejects_missing_questions():
     answers = [answer(question_id, unavailable=question_id == "M3") for question_id in QUESTION_IDS]
-    findings = AssessmentFindings(technical=technical(), questions=answers)
-    assert len(findings.questions) == 17
-    assert findings.questions[2].availability == "unavailable"
+    findings = AssessmentFindings(questions=answers)
+    assert len(findings.questions) == 26
+    assert findings.questions[QUESTION_IDS.index("M3")].availability == "unavailable"
     with pytest.raises(ValidationError):
-        AssessmentFindings(technical=technical(), questions=answers[:-1])
-    with pytest.raises(ValidationError, match="exactly once"):
-        AssessmentFindings(technical=technical(), questions=answers[:-1] + [answers[0]])
+        AssessmentFindings(questions=answers[:-1])
+    with pytest.raises(ValidationError, match="once, in order"):
+        AssessmentFindings(questions=answers[:-1] + [answers[0]])
     with pytest.raises(ValidationError, match="does not permit"):
         answer("M1", unavailable=True)
+    with pytest.raises(ValidationError, match="does not permit"):
+        answer("T1", unavailable=True)
     broken = answer("M6").model_dump()
     del broken["details"]["billing_conditions"]
-    with pytest.raises(ValidationError, match="required field"):
+    with pytest.raises(ValidationError, match=r"Missing: \[.billing_conditions.\]"):
         QuestionAnswer.model_validate(broken)
     incomplete = answer("B3").model_dump()
     incomplete["calculations"] = incomplete["calculations"][:1]
     with pytest.raises(ValidationError, match="low/base/high"):
         QuestionAnswer.model_validate(incomplete)
-    missing_topic = technical().model_dump()
-    del missing_topic["findings"]["licensing"]
-    with pytest.raises(ValidationError, match="required topic"):
-        TechnicalReport.model_validate(missing_topic)
 
 
 def test_calculations_preserve_units_dates_assumptions_and_unknown_costs():
@@ -200,34 +188,11 @@ def test_calculations_preserve_units_dates_assumptions_and_unknown_costs():
     assert "Division by zero" in calculate(divide).limitations[0]
 
 
-def test_claims_cannot_become_measurements_without_sources_and_receipts():
-    missing = dict(
-        scenario="fixture",
-        subject="example",
-        name="p95_latency",
-        value="1.2",
-        unit="second",
-        basis="measured",
-        product_version="1.0",
-    )
-    with pytest.raises(ValidationError, match="protected receipts"):
-        Metric.model_validate(missing)
-    with pytest.raises(ValidationError, match="null values"):
-        Metric.model_validate(missing | {"basis": "unavailable", "limitations": ["Not measured"]})
-    with pytest.raises(ValidationError, match="match its checked calculation"):
-        Metric(
-            scenario="fixture",
-            subject="example",
-            name="delivery_cost",
-            value="999",
-            unit="USD/month",
-            basis="modelled",
-            product_version="1.0",
-            calculation=economics(),
-            assumptions=["Fixture"],
-        )
+def test_citations_need_only_a_source_and_exact_quote():
     quote = "  Exact source whitespace.\n"
-    citation = Citation(
-        source_id="example", text_sha256="a" * 64, start=0, end=len(quote), quote=quote
-    )
-    assert citation.quote == quote
+    citation = Citation(source_id="example", quote=quote)
+    assert citation.quote == quote and citation.text_sha256 is None
+    with pytest.raises(ValidationError, match="bounded source window"):
+        Citation(source_id="example", quote="x", start=5, end=5)
+    with pytest.raises(ValidationError):
+        Citation(source_id="example", quote="")

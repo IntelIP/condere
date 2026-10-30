@@ -5,7 +5,6 @@ must still judge whether the cited evidence supports each conclusion.
 """
 
 import json
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
@@ -15,42 +14,30 @@ from condere.runtime.calculations import Basis, Calculation, Record, Text, calcu
 
 METHODS = Path(__file__).resolve().parents[3] / "agent/references/questions.json"
 QUESTIONS = json.loads(METHODS.read_text())
-QUESTION_IDS = tuple(
-    [f"M{index}" for index in range(1, 9)] + [f"B{index}" for index in range(1, 10)]
-)
+TECHNICAL_IDS = tuple(f"T{index}" for index in range(1, 10))
+MARKET_IDS = tuple(f"M{index}" for index in range(1, 9))
+BUSINESS_IDS = tuple(f"B{index}" for index in range(1, 10))
+QUESTION_IDS = TECHNICAL_IDS + MARKET_IDS + BUSINESS_IDS
 if set(QUESTIONS) != set(QUESTION_IDS):
-    raise ValueError("The preserved contract must contain all M1-M8 and B1-B9 questions.")
-
-TECHNICAL_FIELDS = (
-    "capabilities",
-    "use_cases",
-    "maturity",
-    "versions",
-    "licensing",
-    "limitations",
-    "integration",
-    "hosting_modes",
-    "regions",
-    "hardware",
-    "operating_burden",
-    "costs",
-    "alternatives",
-)
-CAPABILITY_CATEGORIES = {"use_case", "hosting_mode", "region", "hardware", "operating_burden"}
+    raise ValueError("The preserved contract must contain all T1-T9, M1-M8 and B1-B9 questions.")
+STAGES = {"technical": TECHNICAL_IDS, "market": MARKET_IDS, "business": BUSINESS_IDS}
 
 
 class Citation(Record):
+    """Cite by source ID and exact quoted text; the application resolves hash and offsets."""
+
     model_config = {"extra": "forbid", "str_strip_whitespace": False}
     source_id: Text
-    text_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
-    start: int = Field(ge=0)
-    end: int = Field(gt=0)
     quote: Annotated[str, Field(min_length=1, max_length=12_000)]
+    text_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+    start: int | None = Field(default=None, ge=0)
+    end: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def bounded_window(self) -> Self:
-        if self.end <= self.start or self.end - self.start > 12_000:
-            raise ValueError("A citation must name a nonempty, bounded source window.")
+        if self.start is not None and self.end is not None:
+            if self.end <= self.start or self.end - self.start > 12_000:
+                raise ValueError("A citation must name a nonempty, bounded source window.")
         return self
 
 
@@ -88,15 +75,22 @@ class Finding(Record):
     def honest_basis(self) -> Self:
         if len(self.source_ids) != len(set(self.source_ids)):
             raise ValueError("Source references must be distinct.")
-        if {citation.source_id for citation in self.citations} != set(self.source_ids):
+        cited = {citation.source_id for citation in self.citations}
+        if cited != set(self.source_ids):
             raise ValueError(
-                "Every cited source needs a retrievable passage, with no unlisted sources."
+                "Every listed source needs a citation and every citation a listed source. "
+                f"Listed without a citation: {sorted(set(self.source_ids) - cited)}. "
+                f"Cited but not listed: {sorted(cited - set(self.source_ids))}. "
+                "Omit source_ids to derive it from the citations."
             )
         if self.availability == "unavailable":
             if self.basis is not None or not self.limitations:
-                raise ValueError(
-                    "Unavailable findings need a limitation and no claimed evidence basis."
+                problems = ([f"basis must be null (got {self.basis!r})"] if self.basis else []) + (
+                    ["limitations must name why the evidence is unavailable"]
+                    if not self.limitations
+                    else []
                 )
+                raise ValueError("Unavailable findings: " + "; ".join(problems) + ".")
         elif self.basis is None:
             raise ValueError("An available finding needs an evidence basis.")
         elif self.basis == "modelled":
@@ -119,7 +113,12 @@ class QuestionAnswer(Finding):
         if contract is None:
             raise ValueError("Unknown commercialization question.")
         if set(self.details) != set(contract["required_fields"]):
-            raise ValueError(f"{self.question_id} must include each required field exactly once.")
+            required, given = set(contract["required_fields"]), set(self.details)
+            raise ValueError(
+                f"{self.question_id} details must have exactly these keys: "
+                f"{sorted(required)}. Missing: {sorted(required - given)}. "
+                f"Not allowed: {sorted(given - required)}."
+            )
         if self.availability == "unavailable":
             if not contract["allow_unavailable"]:
                 raise ValueError(f"{self.question_id} does not permit an unavailable answer.")
@@ -145,28 +144,6 @@ class QuestionAnswer(Finding):
         return self
 
 
-class Capability(Record):
-    scenario: Text
-    category: Literal["use_case", "hosting_mode", "region", "hardware", "operating_burden"]
-    name: Text
-    status: Literal["supported", "unsupported", "unavailable"]
-    value: Text | None = None
-    finding: Finding
-
-    @model_validator(mode="after")
-    def consistent_status(self) -> Self:
-        if self.status == "unavailable":
-            if self.value is not None or self.finding.availability != "unavailable":
-                raise ValueError(
-                    "Unknown capabilities retain a null value and an unavailable finding."
-                )
-        elif self.finding.availability != "available" or not self.finding.source_ids:
-            raise ValueError(
-                "Supported and unsupported capabilities require attributable evidence."
-            )
-        return self
-
-
 class RepositoryInspection(Record):
     repository_url: Text
     commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
@@ -179,97 +156,58 @@ class RepositoryInspection(Record):
     limitations: list[Text] = Field(default_factory=list)
 
 
-class ComparisonConditions(Record):
-    workload: Text
-    fixture_id: Text
-    measurement_protocol_id: Text
-    baseline_id: Text
-    region: Text
-
-
-class Metric(Record):
-    scenario: Text
-    subject: Text
-    name: Literal["customer_price", "delivery_cost", "p95_latency", "throughput"]
-    value: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
-    unit: Text
-    basis: Literal["measured", "vendor_reported", "modelled", "unavailable"]
-    source_ids: list[Text] = Field(default_factory=list)
-    citations: list[Citation] = Field(default_factory=list)
-    receipt_id: Text | None = None
-    product_version: Text
-    conditions: ComparisonConditions | None = None
-    calculation: Calculation | None = None
-    assumptions: list[Text] = Field(default_factory=list)
-    limitations: list[Text] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def supported_metric(self) -> Self:
-        if {citation.source_id for citation in self.citations} != set(self.source_ids):
-            raise ValueError("Metric sources need retrievable passages.")
-        if self.basis == "unavailable":
-            if self.value is not None or not self.limitations:
-                raise ValueError("Unavailable metrics need null values and explicit limitations.")
-        elif self.value is None:
-            raise ValueError("A numeric metric cannot omit its value.")
-        elif self.basis == "measured":
-            if not self.receipt_id or self.conditions is None or not self.source_ids:
-                raise ValueError(
-                    "Measurements need protected receipts, sources, and comparison conditions."
-                )
-        elif self.basis == "vendor_reported" and not self.source_ids:
-            raise ValueError("Vendor-reported metrics need attributable sources.")
-        elif self.basis == "modelled":
-            if not self.assumptions or self.calculation is None:
-                raise ValueError(
-                    "Modelled metrics need explicit assumptions and reproducible arithmetic."
-                )
-            result = calculate(self.calculation)
-            if result.value != self.value or result.unit != self.unit:
-                raise ValueError("The modelled metric must match its checked calculation.")
-        return self
-
-
-class TechnicalReport(Record):
-    findings: dict[str, Finding]
-    capabilities: list[Capability] = Field(min_length=5)
-    repositories: list[RepositoryInspection] = Field(default_factory=list, max_length=3)
-    metrics: list[Metric] = Field(default_factory=list)
-    inspection_limitations: list[Text] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def complete_technical_coverage(self) -> Self:
-        if set(self.findings) != set(TECHNICAL_FIELDS):
-            raise ValueError("Technical analysis must cover every required topic.")
-        keys = [(item.scenario, item.category, item.name) for item in self.capabilities]
-        if len(set(keys)) != len(keys):
-            raise ValueError("Required capability records must be distinct.")
-        if {item.category for item in self.capabilities} != CAPABILITY_CATEGORIES:
-            raise ValueError(
-                "Technical capabilities must cover use, hosting, region, hardware, and operations."
-            )
-        if not self.repositories and not self.inspection_limitations:
-            raise ValueError("Explain why repository inspection is unavailable or not applicable.")
-        if len({item.repository_url for item in self.repositories}) != len(self.repositories):
-            raise ValueError("Inspect each admitted repository at one exact commit.")
-        metric_keys = [(item.scenario, item.subject, item.name) for item in self.metrics]
-        if len(set(metric_keys)) != len(metric_keys):
-            raise ValueError("Return each scenario/subject/metric once.")
-        return self
-
-
 class AssessmentFindings(Record):
-    technical: TechnicalReport
-    questions: list[QuestionAnswer] = Field(min_length=17, max_length=17)
+    questions: list[QuestionAnswer] = Field(min_length=26, max_length=26)
 
     @model_validator(mode="after")
     def all_questions(self) -> Self:
-        if {item.question_id for item in self.questions} != set(QUESTION_IDS):
-            raise ValueError("An assessment requires all M1-M8 and B1-B9 exactly once.")
+        if [item.question_id for item in self.questions] != list(QUESTION_IDS):
+            raise ValueError("An assessment requires T1-T9, M1-M8 and B1-B9 once, in order.")
+        return self
+
+
+class ScreeningCandidate(Record):
+    name: Text
+    customer: Text
+    problem: Finding
+    commercial_evidence: Finding
+    alternatives: Finding
+
+
+class NextCheck(Record):
+    question: Text
+    action: Text
+    execution: Literal["agent_research", "customer_input", "human_action"]
+    decision_impact: Text
+
+
+class OpportunityScreen(Record):
+    recommendation: Literal["deepen", "reframe", "stop", "needs_customer_evidence"]
+    summary: Text
+    candidates: list[ScreeningCandidate] = Field(min_length=1, max_length=4)
+    selected_candidate: Text | None = None
+    decision_reasons: list[Text] = Field(min_length=1)
+    material_gaps: list[Text]
+    contrary_evidence: list[Finding] = Field(default_factory=list)
+    next_checks: list[NextCheck] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def executable_deeper_research(self) -> Self:
+        names = [candidate.name for candidate in self.candidates]
+        if len(names) != len(set(names)):
+            raise ValueError("Candidate names must be distinct.")
+        if self.selected_candidate is not None and self.selected_candidate not in names:
+            raise ValueError("Select a candidate from the screened alternatives.")
+        if self.recommendation == "deepen" and (
+            self.selected_candidate is None
+            or not any(check.execution == "agent_research" for check in self.next_checks)
+        ):
+            raise ValueError("Deepening needs a selected candidate and executable research.")
         return self
 
 
 class IntakeBrief(Record):
+    analysis_depth: Literal["adaptive", "deep"] = "adaptive"
     original_input: Annotated[Text, StringConstraints(strip_whitespace=False)]
     supplied_facts: list[Text] = Field(default_factory=list)
     technology: Text | None = None

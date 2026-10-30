@@ -69,8 +69,32 @@ def test_launch_selects_only_component_credentials_and_rejects_unsafe_origins():
         )
     )
     assert environment["LANGSMITH_TRACING"] == "false"
-    with pytest.raises(ValueError, match="CONDERE_OPENROUTER_API_KEY"):
+    with pytest.raises(ValueError, match="LANGSMITH_API_KEY"):
         configuration(values)
+    complete = (
+        values
+        | {
+            name: "configured"
+            for name in (
+                "CONDERE_OWNER_ID",
+                "CONDERE_CHECKPOINT_URL",
+                "CONDERE_EVIDENCE_ENDPOINT",
+                "CONDERE_EVIDENCE_REGION",
+                "CONDERE_EVIDENCE_ACCESS_KEY",
+                "CONDERE_EVIDENCE_SECRET_KEY",
+                "CONDERE_EVIDENCE_BUCKET",
+                "CONDERE_ARTIFACT_DIRECTORY",
+                "EXA_API_KEY",
+                "LANGSMITH_API_KEY",
+            )
+        }
+        | {"CONDERE_SMOL_IMAGE": "registry.test/condere@sha256:" + "0" * 64}
+    )
+    # The ChatGPT plan is the default provider; OpenRouter billing needs its own key.
+    with pytest.raises(ValueError, match="CONDERE_OPENROUTER_API_KEY"):
+        configuration(complete | {"CONDERE_MODEL_PROVIDER": "openrouter"})
+    with pytest.raises(ValueError, match="chatgpt or openrouter"):
+        configuration(complete | {"CONDERE_MODEL_PROVIDER": "other"})
     for url in (
         "http://remote.test",
         "https://user:pass@remote.test",

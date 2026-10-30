@@ -22,7 +22,9 @@ from test_service import ready_for_finalization
 from test_service import setup_case as setup_case
 
 from condere.interfaces.api import create_app
+from condere.runtime.contracts import QUESTION_IDS
 from condere.runtime.state import content_hash
+from condere.runtime.tracing import Tracing
 
 pytestmark = [
     pytest.mark.integration,
@@ -107,7 +109,7 @@ async def test_stdio_retrieves_same_saved_result_and_explicit_writes(setup_case,
             assert tools["read_report"].annotations.readOnlyHint
             assert not tools["admit_assessment"].annotations.readOnlyHint
             assert not tools["export_assessment"].annotations.readOnlyHint
-            assert len((await call(session, "capabilities"))["questions"]) == 17
+            assert len((await call(session, "capabilities"))["questions"]) == 26
             listing = await call(session, "list_assessments")
             assert case["id"] in {item["id"] for item in listing["assessments"]}
             identity = {"assessment_id": case["id"]}
@@ -172,22 +174,24 @@ async def test_stdio_retrieves_same_saved_result_and_explicit_writes(setup_case,
 )
 async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tmp_path, request):
     service, owner, case, make, _, calls, created, _ = native_case
-    telemetry = None
-    callbacks = []
+    tracing = None
     trace_ids = []
-    failure_lineage = []
-    outage = os.environ.get("CONDERE_TEST_LANGFUSE_OUTAGE") == "1"
-    if os.environ.get("CONDERE_TEST_LANGFUSE") == "1":
-        from langfuse import Langfuse
-        from langfuse.langchain import CallbackHandler
-
-        telemetry = Langfuse(environment="integration", release=service.method_version, timeout=2)
-        request.addfinalizer(telemetry.shutdown)
-        if not outage:
-            assert telemetry.auth_check()
-        callbacks = [CallbackHandler(public_key=os.environ["LANGFUSE_PUBLIC_KEY"])]
-    assert not outage or telemetry is not None
-    coordinator = make(callbacks=callbacks, telemetry=telemetry)
+    outage = os.environ.get("CONDERE_TEST_LANGSMITH_OUTAGE") == "1"
+    if os.environ.get("CONDERE_TEST_LANGSMITH") == "1" or outage:
+        # Integration traces go to the condere agent's local environment (condere-local).
+        environment = dict(os.environ) | {
+            "LANGSMITH_AGENT_ID": "condere",
+            "LANGSMITH_AGENT_ENVIRONMENT": "local",
+        }
+        environment.pop("LANGSMITH_PROJECT", None)
+        if outage:
+            environment |= {
+                "LANGSMITH_API_KEY": "lsv2-outage",
+                "LANGSMITH_ENDPOINT": "http://127.0.0.1:9",
+            }
+        tracing = Tracing.from_environment(environment, release=service.method_version)
+        request.addfinalizer(tracing.close)
+    coordinator = make(tracing=tracing)
     completed = asyncio.Event()
     run = coordinator.run
 
@@ -209,12 +213,11 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
             },
         )
         assert admitted["id"] == case["id"]
-        await asyncio.wait_for(completed.wait(), timeout=90)
+        await asyncio.wait_for(completed.wait(), timeout=600)
         identity = {"assessment_id": case["id"]}
         report = await call(session, "read_report", identity)
         assert report == service.report(owner, case["id"]).model_dump(mode="json")
-        assert len(report["findings"]["questions"]) == 17
-        assert len(report["findings"]["technical"]["findings"]) == 13
+        assert len(report["findings"]["questions"]) == 26
         sources = await call(session, "list_sources", identity)
         assert sources["total"] == 1
         source = sources["sources"][0]
@@ -224,67 +227,80 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
         archive = await call(session, "export_assessment", identity)
         with zipfile.ZipFile(archive["path"]) as package:
             assert body in [package.read(name) for name in package.namelist()]
-        assert len(calls) == 4 and len(created) == 4
+            assert "assessment.html" in package.namelist()
+            assert len(report["figures"]) >= 1
+            for asset in report["assets"]:
+                data = package.read(asset["path"])
+                assert hashlib.sha256(data).hexdigest() == asset["sha256"]
+                if asset["media_type"] == "image/png":
+                    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+            preview = Path(".artifacts/report-preview")
+            preview.mkdir(parents=True, exist_ok=True)
+            for name in package.namelist():
+                target = preview / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(package.read(name))
+        assert len(calls) == 27 and len(created) == 28
         assert service.state.operations(owner, case["id"]) == []
-        if telemetry is not None:
+        failure = None
+        if tracing is not None:
             status = await call(session, "assessment_status", identity)
-            telemetry_record = status["telemetry"][0]["payload"]
-            trace_ids.append(telemetry_record["trace_id"])
-            assert telemetry_record["execution_mode"] == "simulation"
-            if outage:
-                assert telemetry_record["status"] == "unavailable"
-                assert telemetry_record["error_type"]
-            else:
-                assert telemetry_record["status"] in {"observed", "pending"}
-        if telemetry is not None and not outage:
-            await asyncio.to_thread(telemetry.flush)
-            deadline = asyncio.get_running_loop().time() + 30
-            roles = set()
+            records = [item["payload"] for item in status["telemetry"]]
+            assert len(records) == 27
+            assert {item["role"] for item in records} == {
+                "technical",
+                "market",
+                "business",
+                "review",
+            }
+            for item in records:
+                assert item["execution_mode"] == "simulation"
+                if outage:
+                    assert item["status"] == "unavailable" and item["error_type"]
+                else:
+                    assert item["status"] in {"observed", "pending"}
+            trace_ids = [item["trace_id"] for item in records]
+        if tracing is not None and not outage:
+            keys = {
+                item["id"]: item["worker_key"] for item in service.state.workers(owner, case["id"])
+            }
+            technical = next(
+                item["trace_id"] for item in records if keys[item["worker_id"]] == "technical:T1"
+            )
+            deadline = asyncio.get_running_loop().time() + 60
+            roots = []
             while asyncio.get_running_loop().time() < deadline:
-                observations = await asyncio.to_thread(
-                    telemetry.api.observations.get_many,
-                    trace_id=trace_ids[0],
-                    fields="core,basic,metadata",
-                    limit=1000,
+                await asyncio.to_thread(tracing.client.flush, 5)
+                roots = await asyncio.to_thread(
+                    lambda: [tracing.client.read_run(trace_id) for trace_id in trace_ids]
                 )
-                roles = {
-                    item.metadata.get("role")
-                    for item in observations.data
-                    if item.metadata
-                    and item.metadata.get("assessment_id") == case["id"]
-                    and item.metadata.get("execution_mode") == "simulation"
-                    and item.metadata.get("worker_id")
-                }
-                by_id = {item.id: item for item in observations.data}
+                runs = await asyncio.to_thread(
+                    lambda: list(
+                        tracing.client.list_runs(
+                            project_name="condere-local",
+                            trace_id=technical,
+                            filter='eq(name, "submit_question")',
+                        )
+                    )
+                )
                 failure = next(
-                    (
-                        item
-                        for item in observations.data
-                        if item.name == "submit_technical" and item.level == "ERROR"
-                    ),
+                    (run for run in runs if "missing" in str(run.error or run.outputs)),
                     None,
                 )
-                failure_lineage = []
-                ancestor = failure
-                while ancestor is not None:
-                    assert ancestor.id not in {item.id for item in failure_lineage}
-                    failure_lineage.append(ancestor)
-                    if ancestor.name == "condere.assessment":
-                        break
-                    ancestor = by_id.get(ancestor.parent_observation_id)
-                if (
-                    roles == {"technical", "market", "business", "review"}
-                    and failure_lineage
-                    and failure_lineage[-1].name == "condere.assessment"
-                ):
+                if failure is not None:
                     break
-                await asyncio.sleep(0.5)
-            assert roles == {"technical", "market", "business", "review"}
-            assert failure is not None and "capabilities" in failure.status_message
-            assert failure.metadata["assessment_id"] == case["id"]
-            assert failure.metadata["role"] == "technical"
-            assert any(item.name == "condere-worker" for item in failure_lineage)
-            assert failure_lineage[-1].name == "condere.assessment"
+                await asyncio.sleep(1)
+            assert {run.extra["metadata"]["role"] for run in roots} == {
+                "technical",
+                "market",
+                "business",
+                "review",
+            }
+            assert all(run.extra["metadata"]["assessment_id"] == case["id"] for run in roots)
+            assert {run.extra["metadata"]["question_id"] for run in roots} - {None} == set(
+                QUESTION_IDS
+            )
+            assert failure is not None and str(failure.trace_id) == technical
         from smol import ConnectOptions, Machine
 
         remaining = {machine.id for machine in Machine.list(ConnectOptions(target="local"))}
@@ -306,8 +322,8 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
                     "storage": "native MinIO",
                     "transport": "stdio and HTTP",
                     "provider_operations": 0,
-                    "langfuse_trace_ids": trace_ids,
-                    "recovered_tool_failure_lineage": [item.id for item in failure_lineage],
+                    "langsmith_trace_ids": trace_ids,
+                    "recovered_tool_failure_run": str(failure.id) if failure else None,
                     "telemetry_outage": outage,
                 },
                 indent=2,

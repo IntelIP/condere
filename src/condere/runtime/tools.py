@@ -3,9 +3,11 @@
 import base64
 import hashlib
 import json
+import re
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from langchain_core.tools import ToolException
 from langchain_core.tools import tool as langchain_tool
@@ -13,14 +15,28 @@ from pydantic import ValidationError
 
 from condere.runtime.calculations import Calculation
 from condere.runtime.calculations import calculate as evaluate_calculation
-from condere.runtime.contracts import QuestionAnswer, RepositoryInspection, TechnicalReport
+from condere.runtime.contracts import (
+    QUESTIONS,
+    OpportunityScreen,
+    QuestionAnswer,
+    RepositoryInspection,
+)
 from condere.runtime.dossier import FinalReview
 from condere.runtime.evidence import EvidenceError, SourceDocument
+from condere.runtime.indexing import pinned_snapshot
 from condere.runtime.providers import ExaResearch
-from condere.runtime.repositories import acquire_repository, canonical_repository, stage_repository
+from condere.runtime.repositories import canonical_repository, stage_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import Conflict, NotFound, content_hash
+
+# Bounded correction: a worker may fix rejected submissions, but not loop indefinitely.
+MAX_REJECTED_SUBMISSIONS = 6
+SUBMISSION_TOOLS = {"submit_screen", "submit_question", "submit_review"}
+
+
+class CorrectionLimitReached(RuntimeError):
+    """Stops a worker whose submissions keep failing; accepted records and drafts remain."""
 
 
 def worker_tools(
@@ -51,6 +67,23 @@ def worker_tools(
         ):
             raise Conflict("Research must use this worker's assessment and spending ledger.")
 
+    rejected = []
+
+    def reject(name: str, detail: str, draft) -> None:
+        """Save each rejected draft for review and the dataset, then enforce the bound."""
+        rejected.append(name)
+        state.append_record(
+            owner,
+            assessment_id,
+            "rejected_submission",
+            str(uuid4()),
+            {"worker_id": worker_id, "tool": name, "errors": detail, "draft": draft},
+        )
+        if len(rejected) >= MAX_REJECTED_SUBMISSIONS:
+            raise CorrectionLimitReached(
+                f"Stopped after {len(rejected)} rejected submissions; drafts are saved."
+            )
+
     def guard(name):
         current = service._worker(owner, assessment_id, generation, worker_id)
         if name not in current["assignment"]["permitted_tools"]:
@@ -69,13 +102,35 @@ def worker_tools(
                     if isinstance(error, ValidationError)
                     else str(error)
                 )
+                if function.__name__ in SUBMISSION_TOOLS:
+                    draft = kwargs.get("payload")
+                    draft = (
+                        draft.model_dump(mode="json")
+                        if hasattr(draft, "model_dump")
+                        else draft or {"path": kwargs.get("path")}
+                    )
+                    reject(function.__name__, detail, draft)
                 raise ToolException(detail) from error
+
+        def invalid_arguments(error):
+            detail = json.dumps(error.errors(include_input=False, include_context=False))
+            if function.__name__ in SUBMISSION_TOOLS:
+                # Keep the rejected payload itself: failures are dataset material too.
+                draft = next(
+                    (
+                        item["input"]
+                        for item in error.errors(include_url=False, include_context=False)
+                        if tuple(item["loc"])[:1] == ("payload",)
+                        and isinstance(item["input"], dict)
+                    ),
+                    None,
+                )
+                reject(function.__name__, detail, draft)
+            return detail
 
         registered = langchain_tool(invoke)
         registered.handle_tool_error = True
-        registered.handle_validation_error = lambda error: json.dumps(
-            error.errors(include_input=False, include_context=False)
-        )
+        registered.handle_validation_error = invalid_arguments
         return registered
 
     @tool
@@ -90,16 +145,28 @@ def worker_tools(
             "assignment": assigned["assignment"],
             "budget": case["budget"],
             "submission_schema": (
-                TechnicalReport
-                if assigned["assignment"]["role"] == "technical"
+                OpportunityScreen
+                if assigned["assignment"]["role"] == "screen"
                 else FinalReview
                 if assigned["assignment"]["role"] == "review"
                 else QuestionAnswer
             ).model_json_schema(),
+            "question_contracts": {
+                identity: QUESTIONS[identity]
+                for identity in assigned["assignment"]["question_ids"]
+                if assigned["assignment"]["role"] != "review"
+            },
+            "repository_indexes": [
+                {
+                    key: item["payload"][key]
+                    for key in ("repository", "commit", "source_id", "workspace_path")
+                }
+                for item in state.records(owner, assessment_id, kind="repository_index")
+            ],
             "accepted": {
                 key: {"content_hash": record["content_hash"], "payload": record["payload"]}
                 for key, record in records.items()
-                if record["kind"] in {"technical", "question", "review", "calculation"}
+                if record["kind"] in {"screen", "technical", "question", "review", "calculation"}
             },
         }
         if assigned["assignment"]["role"] == "review":
@@ -120,6 +187,35 @@ def worker_tools(
             ],
             "next_offset": offset + limit if offset + limit < len(sources) else None,
             "total": len(sources),
+        }
+
+    @tool
+    def search_saved_sources(terms: list[str], limit: int = 5) -> dict:
+        """Find relevant passages in this assessment's saved sources without new research.
+
+        Use 1-5 exact words or phrases. Results include exact citations and source
+        identities; retrieve surrounding text if it could change the claim.
+        """
+        guard("search_saved_sources")
+        if not 1 <= len(terms) <= 5 or any(not term.strip() or len(term) > 120 for term in terms):
+            raise ValueError("Use 1-5 nonempty terms of at most 120 characters.")
+        if not 1 <= limit <= 10:
+            raise ValueError("Request 1-10 source passages.")
+        pattern = re.compile("|".join(re.escape(term.strip()) for term in terms), re.IGNORECASE)
+        matches = []
+        for record in state.records(owner, assessment_id, kind="source"):
+            source = SourceDocument.model_validate(record["payload"])
+            text = evidence.text(owner, assessment_id, source.id)
+            match = pattern.search(text)
+            if match:
+                start = max(0, match.start() - 300)
+                matches.append(evidence.passage(owner, assessment_id, source.id, start, 1600))
+                if len(matches) == limit:
+                    break
+        return {
+            "matches": matches,
+            "limit": limit,
+            "scope": "Saved sources only; no match does not establish absence of evidence.",
         }
 
     @tool
@@ -196,12 +292,13 @@ def worker_tools(
 
     @tool
     def inspect_repository(
-        repository_url: str, paths: list[str], commit: str | None = None
+        repository_url: str, paths: list[str] | None = None, commit: str | None = None
     ) -> dict:
-        """Inspect admitted GitHub repository files inside this worker's offline VM."""
+        """Stage a pinned repository offline. Omit paths for its index, then read named files."""
         guard("inspect_repository")
-        if not 1 <= len(paths) <= 30 or len(set(paths)) != len(paths):
-            raise ValueError("Choose 1-30 distinct repository files for this inspection.")
+        paths = paths or []
+        if len(paths) > 30 or len(set(paths)) != len(paths):
+            raise ValueError("Choose at most 30 distinct repository files for this inspection.")
         for path in paths:
             normalized = PurePosixPath(path)
             if normalized.is_absolute() or ".." in normalized.parts or str(normalized) != path:
@@ -229,45 +326,29 @@ def worker_tools(
                     break
         if basis is None:
             raise ValueError("Repository is outside the brief and saved public research results.")
-        admitted = state.admit_repository(owner, assessment_id, generation, repository_url, basis)
-        pin_key = content_hash(repository_url)
-        pins = {
-            item["record_key"]: item["payload"]
-            for item in state.records(owner, assessment_id, kind="repository_pin")
-        }
-        pinned = pins.get(pin_key)
-        if pinned is not None:
-            if commit is not None and commit != pinned["commit"]:
-                raise Conflict("This assessment has already pinned a different repository commit.")
-            commit = pinned["commit"]
-        snapshot = acquire_repository(
-            repository_url,
-            allowed_repositories=admitted,
-            destination=repository_cache,
-            commit=commit,
+        snapshot = pinned_snapshot(
+            state, owner, assessment_id, generation, repository_url, basis, repository_cache, commit
         )
-        if pinned is None:
-            try:
-                state.append_record(
-                    owner,
-                    assessment_id,
-                    "repository_pin",
-                    pin_key,
-                    {
-                        "repository": snapshot.repository,
-                        "commit": snapshot.commit,
-                        "archive_sha256": snapshot.archive_sha256,
-                    },
-                )
-            except Conflict:
-                raise Conflict(
-                    "Another worker pinned this repository; invoke again to use its saved identity."
-                ) from None
         entries = {item["path"]: item for item in snapshot.entries if item["kind"] == "file"}
         if not set(paths).issubset(entries):
             raise ValueError("Requested files are absent from the admitted archive manifest.")
         staged = stage_repository(snapshot, sandbox)
         guard("inspect_repository")
+        if not paths:
+            manifest_path = f"{staged['path']}.manifest.json"
+            transferred = sandbox.upload_files(
+                [(manifest_path, json.dumps(list(snapshot.entries), sort_keys=True).encode())]
+            )
+            if transferred[0].error:
+                raise EvidenceError("The repository directory index could not be transferred.")
+            return {
+                **staged,
+                "manifest_path": manifest_path,
+                "file_count": len(entries),
+                "files": list(entries)[:100],
+                "truncated": len(entries) > 100,
+                "guidance": "Use code-exploration, then inspect named files for citations.",
+            }
         downloaded = sandbox.download_files([f"{staged['path']}/{path}" for path in paths])
         inspected = {}
         excerpts = []
@@ -328,29 +409,28 @@ def worker_tools(
         return {key: record[key] for key in ("record_key", "version", "content_hash")}
 
     @tool
-    def submit_technical(
-        payload: TechnicalReport | None = None,
+    def submit_screen(
+        payload: OpportunityScreen | None = None,
         supersedes_hash: str | None = None,
         path: str | None = None,
     ) -> dict:
-        """Submit complete Technical findings as a payload OR a sandbox JSON file path.
+        """Save qualification and executable next checks as a payload OR sandbox JSON file.
 
-        Build large reports in /workspace and pass their path to avoid copying nested
-        fields into a tool call. All evidence and coverage checks still apply.
-        Identify the prior hash when revising an accepted report.
+        This does not claim the full assessment is complete. A deepen recommendation
+        proceeds automatically through the existing research stages.
         """
-        guard("submit_technical")
+        guard("submit_screen")
         if path is not None:
             if payload is not None:
                 raise ValueError("Supply exactly one of payload or path.")
             downloaded = sandbox.download_files([path])[0]
             if downloaded.error or downloaded.content is None:
-                raise ValueError("Cannot read Technical JSON from the assigned sandbox.")
-            payload = TechnicalReport.model_validate_json(downloaded.content)
+                raise ValueError("Cannot read screening JSON from the assigned sandbox.")
+            payload = OpportunityScreen.model_validate_json(downloaded.content)
         elif payload is None:
             raise ValueError("Supply exactly one of payload or path.")
         return accepted(
-            service.submit_technical(
+            service.submit_screen(
                 owner,
                 assessment_id,
                 generation,
@@ -361,9 +441,26 @@ def worker_tools(
         )
 
     @tool
-    def submit_question(payload: QuestionAnswer, supersedes_hash: str | None = None) -> dict:
-        """Submit one assigned M1-M8 or B1-B9 answer for evidence and contract checks."""
+    def submit_question(
+        payload: QuestionAnswer | None = None,
+        supersedes_hash: str | None = None,
+        path: str | None = None,
+    ) -> dict:
+        """Submit your assigned question's answer as a payload OR a sandbox JSON file path.
+
+        Cite with source_id and the exact quoted text; the application fills in hashes
+        and offsets. Identify the prior hash when revising an accepted answer.
+        """
         guard("submit_question")
+        if path is not None:
+            if payload is not None:
+                raise ValueError("Supply exactly one of payload or path.")
+            downloaded = sandbox.download_files([path])[0]
+            if downloaded.error or downloaded.content is None:
+                raise ValueError("Cannot read the answer JSON from the assigned sandbox.")
+            payload = QuestionAnswer.model_validate_json(downloaded.content)
+        elif payload is None:
+            raise ValueError("Supply exactly one of payload or path.")
         return accepted(
             service.submit_question(
                 owner,
@@ -392,6 +489,8 @@ def worker_tools(
 
     available = [
         read_assessment,
+        search_saved_sources,
+        submit_screen,
         list_sources,
         read_source,
         read_original,
@@ -399,7 +498,6 @@ def worker_tools(
         search_public,
         fetch_public_source,
         inspect_repository,
-        submit_technical,
         submit_question,
         submit_review,
     ]

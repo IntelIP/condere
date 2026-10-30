@@ -8,12 +8,7 @@ from uuid import uuid4
 import pytest
 from test_evidence import SimulatedObjects
 
-from condere.runtime.contracts import (
-    CAPABILITY_CATEGORIES,
-    QUESTION_IDS,
-    QUESTIONS,
-    TECHNICAL_FIELDS,
-)
+from condere.runtime.contracts import QUESTION_IDS, QUESTIONS
 from condere.runtime.dossier import render_json, render_markdown
 from condere.runtime.evidence import EvidenceError, EvidenceStore
 from condere.runtime.service import AssessmentService
@@ -50,15 +45,28 @@ def setup_case():
     return service, owner, case
 
 
-def worker(service, owner, case, role):
-    record = service.assign_worker(owner, case["id"], case["generation"], role)
+def worker(service, owner, case, role, question_id=None):
+    record = service.assign_worker(owner, case["id"], case["generation"], role, question_id)
     return service.state.attach_machine(
-        owner, case["id"], case["generation"], record["id"], "simulated-machine-" + role
+        owner,
+        case["id"],
+        case["generation"],
+        record["id"],
+        "simulated-machine-" + role + (question_id or ""),
     )
 
 
+def stage(identity):
+    return QUESTIONS[identity]["stage"]
+
+
+def unavailable(identity):
+    """Fixture answers are modelled where allowed; observed-only questions stay unavailable."""
+    return identity in {"M3", "B3"} or "modelled" not in QUESTIONS[identity]["allowed_bases"]
+
+
 def question(identity):
-    missing = identity in {"M3", "B3"}
+    missing = unavailable(identity)
     return dict(
         question_id=identity,
         conclusion="Fictional finding for integration checks only.",
@@ -76,35 +84,12 @@ def question(identity):
 
 def accept_findings(service, owner, case):
     workers = {
-        role: worker(service, owner, case, role) for role in ("technical", "market", "business")
+        identity: worker(service, owner, case, stage(identity), identity)
+        for identity in QUESTION_IDS
     }
-    unknown = dict(
-        conclusion="Not established by this fixture.",
-        availability="unavailable",
-        limitations=["No native inspection in this simulation."],
-    )
-    report = dict(
-        findings={field: unknown for field in TECHNICAL_FIELDS},
-        capabilities=[
-            dict(
-                scenario="primary",
-                category=category,
-                name=category,
-                status="unavailable",
-                value=None,
-                finding=unknown,
-            )
-            for category in sorted(CAPABILITY_CATEGORIES)
-        ],
-        inspection_limitations=["This is a simulated assessment."],
-    )
-    service.submit_technical(
-        owner, case["id"], case["generation"], workers["technical"]["id"], report
-    )
     for identity in QUESTION_IDS:
-        role = "market" if identity.startswith("M") else "business"
         service.submit_question(
-            owner, case["id"], case["generation"], workers[role]["id"], question(identity)
+            owner, case["id"], case["generation"], workers[identity]["id"], question(identity)
         )
     return workers
 
@@ -116,7 +101,7 @@ def review(service, owner, case):
             dict(
                 target=target,
                 reviewed_hash=digest,
-                status="insufficient" if target in {"technical", "M3", "B3"} else "qualified",
+                status="insufficient" if unavailable(target) else "qualified",
                 reasoning="This fixture is not proof of customer demand.",
                 qualifications=["Simulated inputs and unverified assumptions."],
             )
@@ -174,7 +159,7 @@ def test_complete_report_and_portable_export_use_same_saved_findings(setup_case,
     result = service.finalize(owner, case["id"], case["generation"])
     assert service.state.get(owner, case["id"])["status"] == "completed"
     assert result.brief.original_input == "  Assess this fictional technology.\n"
-    assert len(result.findings.questions) == 17
+    assert len(result.findings.questions) == 26
     before = service.state.spending(owner, case["id"])
     reopened = AssessmentService(
         AssessmentStore(os.environ["CONDERE_DATABASE_URL"]),
@@ -204,32 +189,24 @@ def test_complete_report_and_portable_export_use_same_saved_findings(setup_case,
     assert service.state.spending(owner, case["id"]) == before
 
 
-def test_assignments_and_named_capabilities_control_acceptance(setup_case):
+def test_question_assignments_control_acceptance(setup_case):
     service, owner, case = setup_case
-    market = worker(service, owner, case, "market")
+    market = worker(service, owner, case, "market", "M1")
+    assert market["assignment"]["skills"] == ["opportunity-framing", "market-evidence"]
     with pytest.raises(Conflict, match="outside"):
-        service.submit_question(owner, case["id"], case["generation"], market["id"], question("B1"))
+        service.submit_question(owner, case["id"], case["generation"], market["id"], question("M2"))
     with pytest.raises(Conflict, match="all assigned"):
         service.finish_worker(owner, case["id"], case["generation"], market["id"])
-    technical = worker(service, owner, case, "technical")
-    unknown = dict(conclusion="Unknown.", availability="unavailable", limitations=["Simulation."])
-    wrong = dict(
-        findings={field: unknown for field in TECHNICAL_FIELDS},
-        capabilities=[
-            dict(
-                scenario="another-scenario",
-                category=category,
-                name=category,
-                status="unavailable",
-                value=None,
-                finding=unknown,
-            )
-            for category in CAPABILITY_CATEGORIES
-        ],
-        inspection_limitations=["Simulation."],
-    )
-    with pytest.raises(Conflict, match="named capability"):
-        service.submit_technical(owner, case["id"], case["generation"], technical["id"], wrong)
+    technical = worker(service, owner, case, "technical", "T2")
+    assert "inspect_repository" in technical["assignment"]["permitted_tools"]
+    assert "deployment-analysis" in technical["assignment"]["skills"]
+    assert "inspect_repository" not in market["assignment"]["permitted_tools"]
+    with pytest.raises(Conflict, match="outside"):
+        service.submit_question(
+            owner, case["id"], case["generation"], technical["id"], question("T1")
+        )
+    with pytest.raises(ValueError, match="own stage"):
+        service.assign_worker(owner, case["id"], case["generation"], "technical", "M1")
     service.state.stop(owner, case["id"], cancel=True)
     with pytest.raises(Conflict, match="not running"):
         service.submit_question(owner, case["id"], case["generation"], market["id"], question("M1"))
@@ -264,7 +241,7 @@ def test_review_cannot_certify_unknowns_or_replace_accepted_originals(setup_case
         owner,
         case["id"],
         case["generation"],
-        workers["business"]["id"],
+        workers["B1"]["id"],
         changed,
         supersedes_hash=previous,
     )

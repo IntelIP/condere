@@ -10,15 +10,15 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import uvicorn
-from langfuse import Langfuse
-from langfuse.langchain import CallbackHandler
 
 from condere.interfaces.api import create_app
 from condere.interfaces.mcp import validate_api_url
+from condere.runtime.chatgpt_plan import DEFAULT_HOME, PlanCredentials
 from condere.runtime.coordinator import AssessmentCoordinator
 from condere.runtime.evidence import EvidenceStore, object_client
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import AssessmentStore
+from condere.runtime.tracing import Tracing
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 
@@ -35,11 +35,20 @@ REQUIRED = (
     "CONDERE_EVIDENCE_BUCKET",
     "CONDERE_SMOL_IMAGE",
     "CONDERE_ARTIFACT_DIRECTORY",
-    "CONDERE_OPENROUTER_API_KEY",
     "EXA_API_KEY",
-    "LANGFUSE_PUBLIC_KEY",
-    "LANGFUSE_SECRET_KEY",
-    "LANGFUSE_BASE_URL",
+    "LANGSMITH_API_KEY",
+)
+# Model billing: CONDERE_MODEL_PROVIDER=chatgpt (default, the operator's ChatGPT plan via
+# Sign in with ChatGPT) or openrouter (requires CONDERE_OPENROUTER_API_KEY).
+PROVIDER = ("CONDERE_MODEL_PROVIDER", "CONDERE_CHATGPT_HOME", "CONDERE_OPENROUTER_API_KEY")
+# Trace destination: LANGSMITH_PROJECT, or LANGSMITH_AGENT_ID with LANGSMITH_AGENT_ENVIRONMENT.
+TRACING = (
+    "LANGSMITH_PROJECT",
+    "LANGSMITH_AGENT_ID",
+    "LANGSMITH_AGENT_ENVIRONMENT",
+    "LANGSMITH_ENDPOINT",
+    "LANGSMITH_WORKSPACE_ID",
+    "LANGSMITH_DATASET",
 )
 
 
@@ -68,8 +77,13 @@ def configuration(environment) -> dict[str, str]:
     if missing:
         raise ValueError("Missing Condere runtime configuration: " + ", ".join(missing))
     values = {name: environment[name] for name in REQUIRED}
+    values |= {name: environment[name] for name in TRACING + PROVIDER if environment.get(name)}
+    provider = values.setdefault("CONDERE_MODEL_PROVIDER", "chatgpt")
+    if provider not in {"chatgpt", "openrouter"}:
+        raise ValueError("CONDERE_MODEL_PROVIDER must be chatgpt or openrouter.")
+    if provider == "openrouter" and not values.get("CONDERE_OPENROUTER_API_KEY"):
+        raise ValueError("Missing Condere runtime configuration: CONDERE_OPENROUTER_API_KEY")
     validate_api_url(values["CONDERE_API_URL"])
-    validate_api_url(values["LANGFUSE_BASE_URL"])
     if not values["CONDERE_OWNER_ID"].strip():
         raise ValueError("Configure a nonempty owner identity.")
     token = values["CONDERE_API_TOKEN"]
@@ -84,28 +98,30 @@ def build_app():
     state = AssessmentStore(values["CONDERE_DATABASE_URL"])
     state.setup()
     objects = object_client(values)
-    telemetry = None
+    tracing = None
     try:
         evidence = EvidenceStore(state, objects, values["CONDERE_EVIDENCE_BUCKET"])
         service = AssessmentService(state, evidence, execution_mode="live")
-        telemetry = Langfuse(
-            public_key=values["LANGFUSE_PUBLIC_KEY"],
-            secret_key=values["LANGFUSE_SECRET_KEY"],
-            base_url=values["LANGFUSE_BASE_URL"],
-            environment="development",
-            release=service.method_version,
-            timeout=2,
-        )
+        tracing = Tracing.from_environment(values, release=service.method_version)
+        provider, plan = values["CONDERE_MODEL_PROVIDER"], None
+        if provider == "chatgpt":
+            plan = PlanCredentials(Path(values.get("CONDERE_CHATGPT_HOME") or DEFAULT_HOME))
+            if not plan.status()["plan_usage"]:
+                raise ValueError(
+                    "Sign in with ChatGPT first: uv run python scripts/chatgpt_login.py"
+                )
         coordinator = AssessmentCoordinator(
             service,
             checkpoint_dsn=values["CONDERE_CHECKPOINT_URL"],
             application_dsn=values["CONDERE_DATABASE_URL"],
             image=values["CONDERE_SMOL_IMAGE"],
             artifacts=Path(values["CONDERE_ARTIFACT_DIRECTORY"]),
-            openrouter_key=values["CONDERE_OPENROUTER_API_KEY"],
+            openrouter_key=values.get("CONDERE_OPENROUTER_API_KEY")
+            if provider == "openrouter"
+            else None,
+            plan_credentials=plan,
             exa_key=values["EXA_API_KEY"],
-            callbacks=[CallbackHandler(public_key=values["LANGFUSE_PUBLIC_KEY"])],
-            telemetry=telemetry,
+            tracing=tracing,
         )
         app = create_app(
             service,
@@ -116,8 +132,8 @@ def build_app():
         )
     except BaseException:
         objects.close()
-        if telemetry is not None:
-            telemetry.shutdown()
+        if tracing is not None:
+            tracing.close()
         raise
 
     application_lifespan = app.router.lifespan_context
@@ -129,7 +145,7 @@ def build_app():
                 yield
         finally:
             objects.close()
-            await asyncio.to_thread(telemetry.shutdown)
+            await asyncio.to_thread(tracing.close)
 
     app.router.lifespan_context = lifespan
     return app

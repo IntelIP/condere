@@ -87,7 +87,7 @@ async def test_http_saved_results_sources_and_export_never_start_research(setup_
         ).status_code == 401
         capabilities = (await client.get(PREFIX + "/capabilities")).json()
         assert capabilities["agent_id"] == "condere"
-        assert len(capabilities["questions"]) == 17
+        assert len(capabilities["questions"]) == 26
         listed = (await client.get(PREFIX)).json()
         assert case["id"] in {item["id"] for item in listed["assessments"]}
         assert (await client.get(PREFIX, headers=OTHER)).json()["assessments"] == []
@@ -237,12 +237,12 @@ async def test_http_start_to_native_dossier_uses_the_real_coordinator(native_cas
         )
         assert response.status_code == 202
         assert response.json()["id"] == case["id"]
-        await asyncio.wait_for(completed.wait(), timeout=45)
+        await asyncio.wait_for(completed.wait(), timeout=600)
         status = (await client.get(f"{PREFIX}/{case['id']}")).json()
         assert status["status"] == "completed"
         assert {item["status"] for item in status["workers"]} == {"completed"}
         report = (await client.get(f"{PREFIX}/{case['id']}/report")).json()
         assert report == service.report(owner, case["id"]).model_dump(mode="json")
-        assert len(report["findings"]["questions"]) == 17
-        assert len(calls) == 4
+        assert len(report["findings"]["questions"]) == 26
+        assert len(calls) == 27
         assert service.state.operations(owner, case["id"]) == []

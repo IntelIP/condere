@@ -16,7 +16,7 @@ from test_evidence import SimulatedObjects
 from test_sandbox import RehearsalModel
 from test_service import question, review
 
-from condere.runtime.contracts import TECHNICAL_FIELDS
+from condere.runtime.contracts import MARKET_IDS, QUESTION_IDS, TECHNICAL_IDS
 from condere.runtime.coordinator import AssessmentCoordinator
 from condere.runtime.evidence import EvidenceStore, object_client
 from condere.runtime.sandbox import SmolSandbox
@@ -44,7 +44,7 @@ class BlockingModel(RehearsalModel):
 
 
 @pytest.fixture
-def native_case(tmp_path, monkeypatch):
+def native_case(tmp_path, monkeypatch, request):
     for key in (
         "OPENROUTER_API_KEY",
         "CONDERE_OPENROUTER_API_KEY",
@@ -56,27 +56,11 @@ def native_case(tmp_path, monkeypatch):
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
 
-    local_tracing = os.environ.get("CONDERE_TEST_LANGFUSE") == "1"
-    if local_tracing and os.environ.get("LANGFUSE_BASE_URL") != "http://127.0.0.1:3000":
-        pytest.fail("Native tracing checks require the task's local Langfuse service.")
-    sync_request = httpx.HTTPTransport.handle_request
-    async_request = httpx.AsyncHTTPTransport.handle_async_request
-
-    def is_local_trace(request):
-        return local_tracing and (request.url.scheme, request.url.host, request.url.port) == (
-            "http",
-            "127.0.0.1",
-            3000,
-        )
-
+    # LangSmith uses requests rather than httpx, so traces remain possible here.
     def no_http(transport, request):
-        if is_local_trace(request):
-            return sync_request(transport, request)
         pytest.fail("Coordinator fixtures must not use real provider HTTP.")
 
     async def no_async_http(transport, request):
-        if is_local_trace(request):
-            return await async_request(transport, request)
         pytest.fail("Coordinator fixtures must not use real provider HTTP.")
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", no_http)
@@ -105,6 +89,7 @@ def native_case(tmp_path, monkeypatch):
             "original_input": (
                 "Assess a fictional library. No market or customer claims are established."
             ),
+            "analysis_depth": getattr(request, "param", "deep"),
         },
     )
     created, calls = [], []
@@ -117,49 +102,25 @@ def native_case(tmp_path, monkeypatch):
 
     monkeypatch.setattr(SmolSandbox, "create", tracked_create)
 
+    def accepted():
+        return {item["record_key"] for item in state.records(owner, case["id"], kind="question")}
+
     def factory(context):
-        calls.append((context.worker_role, context.generation))
-        role = context.worker_role
-        if role == "technical":
-            assignment = next(
-                item["assignment"]
-                for item in state.workers(owner, case["id"])
-                if item["worker_key"] == role and item["generation"] == context.generation
-            )
-            unknown = {
-                "conclusion": "Unavailable in this fictional fixture.",
-                "availability": "unavailable",
-                "limitations": ["No real research occurred."],
-            }
-            payload = {
-                "findings": {field: unknown for field in TECHNICAL_FIELDS},
-                "capabilities": [
-                    item | {"status": "unavailable", "value": None, "finding": unknown}
-                    for item in assignment["required_capabilities"]
-                ],
-                "inspection_limitations": [
-                    "Deterministic fixture; no business conclusion is proven."
-                ],
-            }
-            submissions = [
-                {"name": "submit_technical", "args": {"payload": payload}, "id": "technical"}
-            ]
-        elif role in {"market", "business"}:
-            if role == "business":
-                assert len(state.records(owner, case["id"], kind="technical")) == 1
-                assert {
-                    item["record_key"] for item in state.records(owner, case["id"], kind="question")
-                } >= {"M" + str(number) for number in range(1, 9)}
-            identities = (
-                ["M" + str(number) for number in range(1, 9)]
-                if role == "market"
-                else ["B" + str(number) for number in range(1, 10)]
-            )
+        identity = context.question_id
+        calls.append((identity or context.worker_role, context.generation))
+        if identity is not None:
+            # Dependency order: T1-T8, then T9, then Market, then Business.
+            required = {
+                "T9": set(TECHNICAL_IDS) - {"T9"},
+                "M": set(TECHNICAL_IDS),
+                "B": set(TECHNICAL_IDS) | set(MARKET_IDS),
+            }.get(identity if identity == "T9" else identity[0], set())
+            assert required <= accepted()
             submissions = [
                 {"name": "submit_question", "args": {"payload": question(identity)}, "id": identity}
-                for identity in identities
             ]
         else:
+            assert accepted() == set(QUESTION_IDS)
             submissions = [
                 {
                     "name": "submit_review",
@@ -178,14 +139,14 @@ def native_case(tmp_path, monkeypatch):
                             content="",
                             tool_calls=[
                                 {
-                                    "name": "submit_technical",
+                                    "name": "submit_question",
                                     "args": {"payload": {}},
                                     "id": "deliberately-invalid-technical",
                                 }
                             ],
                         )
                     ]
-                    if role == "technical"
+                    if identity == "T1"
                     else []
                 ),
                 AIMessage(content="", tool_calls=submissions),
@@ -193,7 +154,7 @@ def native_case(tmp_path, monkeypatch):
             ]
         )
 
-    def coordinator(model_factory=None, callbacks=None, telemetry=None):
+    def coordinator(model_factory=None, callbacks=None, tracing=None):
         return AssessmentCoordinator(
             service,
             checkpoint_dsn=os.environ["CONDERE_CHECKPOINT_URL"],
@@ -202,7 +163,7 @@ def native_case(tmp_path, monkeypatch):
             artifacts=tmp_path,
             model_factory=model_factory or factory,
             callbacks=callbacks,
-            telemetry=telemetry,
+            tracing=tracing,
         )
 
     if native_objects:
@@ -232,16 +193,18 @@ async def test_complete_native_team_publishes_one_saved_dossier(native_case):
     coordinator = make()
     dossier = await coordinator.run(owner, case["id"])
     assert dossier.execution_mode == "simulation"
-    assert len(dossier.findings.questions) == 17
-    assert len(dossier.findings.technical.findings) == 13
-    assert len(dossier.review.items) == 18
-    assert set(calls[:2]) == {("technical", 1), ("market", 1)}
-    assert calls[2:] == [("business", 1), ("review", 1)]
+    assert len(dossier.findings.questions) == 26
+    assert len(dossier.review.items) == 26
+    order = [name for name, _ in calls]
+    assert set(order[:8]) == set(TECHNICAL_IDS) - {"T9"} and order[8] == "T9"
+    assert set(order[9:17]) == set(MARKET_IDS) and order[-1] == "review"
     workers = service.state.workers(owner, case["id"])
-    assert len(workers) == 4
+    assert len(workers) == 27
     assert {worker["status"] for worker in workers} == {"completed"}
-    assert len({worker["machine_id"] for worker in workers}) == 4
-    assert len({worker["thread_id"] for worker in workers}) == 4
+    assert len({worker["machine_id"] for worker in workers}) == 27
+    assert len({worker["thread_id"] for worker in workers}) == 27
+    rejected = service.state.records(owner, case["id"], kind="rejected_submission")
+    assert len(rejected) == 1 and rejected[0]["payload"]["tool"] == "submit_question"
     exports = service.state.records(owner, case["id"], kind="worker_export")
     for record in exports:
         raw = (artifacts / case["id"] / record["record_key"] / "accepted.json").read_bytes()
@@ -249,11 +212,11 @@ async def test_complete_native_team_publishes_one_saved_dossier(native_case):
         assert {key: value["content_hash"] for key, value in json.loads(raw).items()} == (
             record["payload"]["accepted_hashes"]
         )
-    assert len(exports) == 4
+    assert len(exports) == 27
     assert dossier.model_dump(mode="json") == (await make().run(owner, case["id"])).model_dump(
         mode="json"
     )
-    assert len(calls) == 4
+    assert len(calls) == 27
     assert service.state.operations(owner, case["id"]) == []
     existing = {item.id for item in Machine.list(ConnectOptions(target="local"))}
     assert not {sandbox.id for sandbox in created} & existing
@@ -304,21 +267,9 @@ async def test_continuation_preserves_answers_and_reuses_finished_research_roles
     service, owner, case, make, factory, calls, _, _ = native_case
 
     def incomplete(context):
-        if context.worker_role == "business":
+        if context.question_id == "B2":
             return RehearsalModel(
-                responses=[
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "name": "submit_question",
-                                "args": {"payload": question("B1")},
-                                "id": "B1",
-                            }
-                        ],
-                    ),
-                    AIMessage(content="Simulated interruption after one accepted Business record."),
-                ]
+                responses=[AIMessage(content="Simulated interruption without a B2 record.")]
             )
         return factory(context)
 
@@ -329,17 +280,19 @@ async def test_continuation_preserves_answers_and_reuses_finished_research_roles
         item["record_key"]: item["content_hash"]
         for item in service.state.records(owner, case["id"], kind="question")
     }
-    assert len(before) == 9
+    assert set(TECHNICAL_IDS) | set(MARKET_IDS) <= set(before) and "B2" not in before
     count = len(calls)
     with pytest.raises(Conflict, match="explicit continuation"):
         await make().run(owner, case["id"])
-    with pytest.raises(Conflict, match="capability requirements"):
-        await make().run(owner, case["id"], resume=True, required_capabilities=[])
+    with pytest.raises(Conflict, match="private-query terms"):
+        await make().run(owner, case["id"], resume=True, private_terms=("changed",))
     dossier = await make().run(owner, case["id"], resume=True)
-    assert len(dossier.findings.questions) == 17
-    assert calls[count:] == [("business", 2), ("review", 2)]
+    assert len(dossier.findings.questions) == 26
+    resumed = calls[count:]
+    assert ("B2", 2) in resumed and resumed[-1] == ("review", 2)
+    assert all(name.startswith("B") or name == "review" for name, _ in resumed)
     after = service.state.records(owner, case["id"], kind="question")
-    assert len(after) == 17
+    assert len(after) == 26
     assert all(
         item["content_hash"] == before[item["record_key"]]
         for item in after

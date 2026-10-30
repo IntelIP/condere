@@ -19,17 +19,20 @@ import httpx
 from langchain_core.messages import message_to_dict, messages_from_dict
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models.base import _construct_lc_result_from_responses_api
 from pydantic import PrivateAttr
 
 from condere.runtime.evidence import EvidenceStore
 from condere.runtime.operations import ProviderResult, execute_once
 from condere.runtime.state import AssessmentStore, Conflict, content_hash
 
-MODEL_ID = "openai/gpt-5.4-mini"
-MODEL_CONTEXT_TOKENS = 400_000
+MODEL_ID = "openai/gpt-6.1-sol"
+MODEL_CONTEXT_TOKENS = 1_050_000
 MODEL_OUTPUT_TOKENS = 8_192
-PROMPT_USD_PER_TOKEN = Decimal("0.00000075")
-OUTPUT_USD_PER_TOKEN = Decimal("0.0000045")
+# Conservative long-context bounds, including the published cache-write premium.
+# OpenRouter's model/endpoint catalogs checked 2026-10-22; these are not invoices.
+PROMPT_USD_PER_TOKEN = Decimal("0.000005")
+OUTPUT_USD_PER_TOKEN = Decimal("0.000015")
 SEARCH_BOUND_MICROUSD = 7_000  # auto search, <=10 results, text only; 2026-10-21 docs.
 CONTENTS_BOUND_MICROUSD = 1_000  # one URL, text only; 2026-10-21 docs.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -51,6 +54,7 @@ class ProviderContext:
     assessment_id: str
     generation: int
     worker_role: str
+    question_id: str | None = None
 
 
 def _encode_result(result: ChatResult) -> dict:
@@ -80,26 +84,36 @@ class AccountedChatOpenAI(ChatOpenAI):
     _context: ProviderContext = PrivateAttr()
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        for name in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            if name in kwargs and (
+                type(kwargs[name]) is not int or not 1 <= kwargs[name] <= MODEL_OUTPUT_TOKENS
+            ):
+                raise ValueError("The model request must preserve its admitted output-token cap.")
+        if "max_tokens" in kwargs:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-        cap = payload.pop("max_completion_tokens", payload.get("max_tokens"))
+        cap = payload.get("max_output_tokens")
         if type(cap) is not int or cap < 1 or cap > MODEL_OUTPUT_TOKENS:
             raise ValueError("The model request must preserve its admitted output-token cap.")
-        payload["max_tokens"] = cap
         permitted = {
             "model",
-            "messages",
+            "input",
             "stream",
-            "max_tokens",
+            "max_output_tokens",
             "tools",
             "tool_choice",
             "parallel_tool_calls",
-            "response_format",
+            "text",
+            "store",
+            "include",
             "extra_body",
         }
         if (
             set(payload) - permitted
             or payload["model"] != MODEL_ID
             or payload.get("stream") is not False
+            or payload.get("store") is not False
+            or payload.get("include", []) != ["reasoning.encrypted_content"]
         ):
             raise ValueError("The model request includes an unbounded or unapproved option.")
         if payload.get("extra_body") != router_options():
@@ -111,17 +125,24 @@ class AccountedChatOpenAI(ChatOpenAI):
                 raise ValueError(
                     "Only Condere-owned function tools are allowed; native paid tools are disabled."
                 )
-        for message in payload["messages"]:
-            content = message.get("content")
+        for message in payload["input"]:
+            if message.get("type", "message") not in {
+                "message",
+                "function_call",
+                "function_call_output",
+                "reasoning",
+            }:
+                raise ValueError("Only local message and function-call history is allowed.")
+            content = message.get("content", message.get("output"))
             if isinstance(content, list):
                 for block in content:
-                    if block.get("type") not in {"text", "image_url"}:
+                    if block.get("type") not in {"input_text", "output_text", "input_image"}:
                         raise ValueError(
                             "Convert files to text or bounded images before model dispatch."
                         )
-                    if block.get("type") == "image_url" and not block["image_url"][
-                        "url"
-                    ].startswith(("data:image/png;base64,", "data:image/jpeg;base64,")):
+                    if block.get("type") == "input_image" and not block.get(
+                        "image_url", ""
+                    ).startswith(("data:image/png;base64,", "data:image/jpeg;base64,")):
                         raise ValueError(
                             "Images must be supplied as admitted bytes, not external fetch URLs."
                         )
@@ -133,17 +154,21 @@ class AccountedChatOpenAI(ChatOpenAI):
         key = "model:" + context.worker_role + ":" + content_hash(payload)
         maximum = microusd(
             MODEL_CONTEXT_TOKENS * PROMPT_USD_PER_TOKEN
-            + payload["max_tokens"] * OUTPUT_USD_PER_TOKEN
+            + payload["max_output_tokens"] * OUTPUT_USD_PER_TOKEN
         )
         called = False
 
         def invoke():
             nonlocal called
             called = True
-            result = super(AccountedChatOpenAI, self)._generate(
-                messages, stop=stop, run_manager=run_manager, **kwargs
+            response = self.root_client.responses.create(**payload)
+            result = _construct_lc_result_from_responses_api(
+                response, output_version="responses/v1"
             )
-            usage = (result.llm_output or {}).get("token_usage", {})
+            # LangChain's Responses conversion drops provider-specific cost fields.
+            # Preserve the raw SDK usage before conversion for the spending ledger.
+            usage = response.usage.model_dump(exclude_none=True) if response.usage else {}
+            result.llm_output = {"token_usage": usage, "model_name": MODEL_ID}
             cost = usage.get("cost")
             known = cost is not None and not usage.get("is_byok", False)
             basis = (
@@ -218,9 +243,9 @@ def router_options() -> dict:
             "only": ["openai"],
             "allow_fallbacks": False,
             "require_parameters": True,
-            "max_price": {"prompt": 0.75, "completion": 4.5, "image": 0, "request": 0},
+            "max_price": {"prompt": 4, "completion": 15, "image": 0, "request": 0},
         },
-        "reasoning": {"effort": "low"},
+        "reasoning": {"effort": "medium"},
         "plugins": [],
     }
 
@@ -239,7 +264,9 @@ def accounted_model(
         timeout=300,
         disable_streaming=True,
         stream_usage=False,
-        use_responses_api=False,
+        use_responses_api=True,
+        store=False,
+        include=["reasoning.encrypted_content"],
         extra_body=router_options(),
         profile={
             "max_input_tokens": 48_000,

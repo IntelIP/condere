@@ -1,4 +1,4 @@
-"""One bounded assessment: Technical/Market work, Business synthesis, and final review."""
+"""One assessment: repository index, per-question Technical/Market/Business work, review."""
 
 import asyncio
 import contextlib
@@ -9,11 +9,20 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from langfuse import Langfuse
+import httpx
 from smol import ConnectOptions, Machine
 
+from condere.runtime.chatgpt_plan import PlanChatOpenAI, PlanCredentials, plan_model
 from condere.runtime.checkpoints import checkpoint_store
-from condere.runtime.contracts import CAPABILITY_CATEGORIES
+from condere.runtime.contracts import BUSINESS_IDS, MARKET_IDS, QUESTIONS, TECHNICAL_IDS
+from condere.runtime.indexing import (
+    build_index,
+    github_metadata,
+    install_index,
+    pinned_snapshot,
+    save_index,
+    save_metadata,
+)
 from condere.runtime.providers import (
     AccountedChatOpenAI,
     ExaResearch,
@@ -24,9 +33,18 @@ from condere.runtime.repositories import canonical_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import Conflict
+from condere.runtime.tracing import Tracing, WorkerTrace
 from condere.runtime.workers import run_worker
 
-STAGES = (("technical", "market"), ("business",), ("review",))
+# Technical analysis of the code comes first; T9 synthesizes T1-T8 before Market and Business.
+STAGE_ROLES = {"technical", "market", "business"}
+STAGES = (
+    tuple("technical:" + identity for identity in TECHNICAL_IDS if identity != "T9"),
+    ("technical:T9",),
+    tuple("market:" + identity for identity in MARKET_IDS),
+    tuple("business:" + identity for identity in BUSINESS_IDS),
+    ("review",),
+)
 
 
 class AssessmentCoordinator:
@@ -39,13 +57,15 @@ class AssessmentCoordinator:
         image: str,
         artifacts: Path,
         openrouter_key: str | None = None,
+        plan_credentials: PlanCredentials | None = None,
         exa_key: str | None = None,
         model_factory=None,
         callbacks: list | None = None,
-        telemetry: Langfuse | None = None,
+        tracing: Tracing | None = None,
+        concurrency: int = 3,
     ):
         if service.execution_mode == "live" and (
-            not openrouter_key or not exa_key or model_factory
+            not (openrouter_key or plan_credentials) or not exa_key or model_factory
         ):
             raise ValueError(
                 "Live coordination requires provider keys and the accounted model factory."
@@ -57,20 +77,23 @@ class AssessmentCoordinator:
         self.image, self.artifacts = image, artifacts.resolve()
         self.artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._router_key, self._exa_key = openrouter_key, exa_key
+        # ChatGPT plan usage takes precedence when the operator signed in for it.
+        self.plan_credentials = plan_credentials
         self._model_factory, self.callbacks = model_factory, callbacks or []
-        self.telemetry = telemetry
+        self.tracing = tracing
+        if concurrency < 1:
+            raise ValueError("Run at least one worker at a time.")
+        self.concurrency = concurrency
         self._tasks: dict[tuple[str, str], asyncio.Task] = {}
 
     @staticmethod
     def machine_name(worker: dict) -> str:
         return "condere-" + worker["id"]
 
-    def _plan(self, owner, assessment_id, brief, requirements, private_terms):
+    def _plan(self, owner, assessment_id, brief, private_terms):
         prior = self.state.records(owner, assessment_id, kind="execution_plan")
         if prior:
             plan = prior[0]["payload"]
-            if requirements is not None and requirements != plan["required_capabilities"]:
-                raise Conflict("Continuation cannot replace the admitted capability requirements.")
             if private_terms is not None and list(private_terms) != plan["private_terms"]:
                 raise Conflict("Continuation must preserve the admitted private-query terms.")
             return plan
@@ -83,47 +106,29 @@ class AssessmentCoordinator:
                 )
             }
         )
-        requirements = (
-            requirements
-            if requirements is not None
-            else [
-                {"scenario": "primary", "category": category, "name": category}
-                for category in sorted(CAPABILITY_CATEGORIES)
-            ]
-        )
-        if any(
-            set(item) != {"scenario", "category", "name"}
-            or item["category"] not in CAPABILITY_CATEGORIES
-            or not item["scenario"]
-            or not item["name"]
-            for item in requirements
-        ):
-            raise ValueError("Every capability requirement needs its scenario, category, and name.")
         plan = {
-            "stages": [list(stage) for stage in STAGES],
+            "stages": ([["screen"]] if brief.get("analysis_depth") == "adaptive" else [])
+            + [list(stage) for stage in STAGES],
             "repository_candidates": candidates,
-            "required_capabilities": requirements,
             "private_terms": list(private_terms or ()),
         }
         self.state.append_record(owner, assessment_id, "execution_plan", "main", plan)
         return plan
 
-    def _completed_role(self, owner, assessment_id, role):
-        if role == "review":
-            return (
-                None  # A continuation reviews the currently accepted findings and saved evidence.
-            )
+    def _completed_unit(self, owner, assessment_id, unit):
+        # A completed review is reused only while every reviewed answer is unchanged (input
+        # hashes below), like any other unit; finalization verifies the hashes again.
         heads = self.service._heads(self.state.records(owner, assessment_id))
         exports = {
             item["record_key"]: item["payload"]
             for item in self.state.records(owner, assessment_id, kind="worker_export")
         }
         for worker in reversed(self.state.workers(owner, assessment_id)):
-            if worker["assignment"]["role"] != role or worker["status"] != "completed":
+            if worker["worker_key"] != unit or worker["status"] != "completed":
                 continue
             accepted = (worker["completion"] or {}).get("accepted_hashes", {})
             exported = exports.get(worker["id"])
-            if exported is None or exported.get("input_hashes") != self._input_hashes(heads, role):
+            if exported is None or exported.get("input_hashes") != self._input_hashes(heads, unit):
                 continue
             if accepted and all(
                 heads.get(key, {}).get("content_hash") == value for key, value in accepted.items()
@@ -132,16 +137,21 @@ class AssessmentCoordinator:
         return None
 
     @staticmethod
-    def _input_hashes(heads, role):
+    def _input_hashes(heads, unit):
+        """Accepted records a unit builds on; a changed input invalidates its saved result."""
+        role, _, question = unit.partition(":")
+        prefixes = {
+            "screen": (),
+            "technical": ("question:T",) if question == "T9" else (),
+            "market": ("question:T",),
+            "business": ("question:T", "question:M"),
+            "review": ("question:",),
+        }[role]
         return {
             key: record["content_hash"]
             for key, record in heads.items()
-            if role in {"business", "review"}
-            and (
-                key == "technical:main"
-                or key.startswith("question:M")
-                or (role == "review" and key.startswith("question:B"))
-            )
+            if (role != "screen" and key == "screen:main")
+            or (key.startswith(prefixes) and key != "question:" + question)
         }
 
     async def _stop_machines(self, owner, assessment_id):
@@ -149,11 +159,21 @@ class AssessmentCoordinator:
         names = {worker["machine_id"] or self.machine_name(worker): worker for worker in workers}
         machines = await asyncio.to_thread(Machine.list, ConnectOptions(target="local"))
         for machine in machines:
-            if machine.id not in names or machine.state in {"stopped", "exited"}:
+            report_machine = re.fullmatch(
+                rf"condere-(report|index)-{re.escape(assessment_id)}-[0-9]+", machine.id
+            )
+            if (machine.id not in names and not report_machine) or machine.state in {
+                "stopped",
+                "exited",
+            }:
                 continue
-            worker = names[machine.id]
+            artifact = (
+                names[machine.id]["id"]
+                if machine.id in names
+                else machine.id.split("-")[1] + "-" + machine.id.rsplit("-", 1)[1]
+            )
             sandbox = await asyncio.to_thread(
-                SmolSandbox.reconnect, machine.id, self.artifacts / assessment_id / worker["id"]
+                SmolSandbox.reconnect, machine.id, self.artifacts / assessment_id / artifact
             )
             await asyncio.to_thread(sandbox.close)
 
@@ -173,49 +193,12 @@ class AssessmentCoordinator:
         assessment_id: str,
         **options,
     ):
-        current = await asyncio.to_thread(self.state.get, owner, assessment_id)
-        if self.telemetry is None or current["status"] == "completed":
-            return await self._run(owner, assessment_id, **options)
-        span_context = contextlib.ExitStack()
-        trace_id = None
-        try:
-            span_context.enter_context(
-                self.telemetry.start_as_current_observation(
-                    name="condere.assessment",
-                    metadata={
-                        "assessment_id": assessment_id,
-                        "execution_mode": self.service.execution_mode,
-                    },
-                )
-            )
-            trace_id = self.telemetry.get_current_trace_id()
-        except Exception:
-            logging.getLogger(__name__).warning("Assessment telemetry could not start.")
-        try:
-            with span_context:
-                return await self._run(owner, assessment_id, **options)
-        finally:
-            try:
-                await asyncio.to_thread(self._record_telemetry, owner, assessment_id, trace_id)
-            except Exception:
-                logging.getLogger(__name__).warning(
-                    "Assessment telemetry status could not be saved."
-                )
+        return await self._run(owner, assessment_id, **options)
 
-    def _record_telemetry(self, owner: str, assessment_id: str, trace_id: str | None):
-        status, error_type = "unavailable", None
-        try:
-            if trace_id:
-                self.telemetry.flush()
-                observations = self.telemetry.api.observations.get_many(
-                    trace_id=trace_id,
-                    fields="core",
-                    limit=1,
-                    request_options={"timeout_in_seconds": 2, "max_retries": 0},
-                )
-                status = "observed" if observations.data else "pending"
-        except Exception as error:
-            error_type = type(error).__name__
+    def _record_telemetry(self, owner, assessment_id, worker, trace_id: str | None):
+        status, error_type = (
+            self.tracing.status(trace_id) if trace_id else ("unavailable", "TraceNotStarted")
+        )
         self.state.append_record(
             owner,
             assessment_id,
@@ -226,6 +209,8 @@ class AssessmentCoordinator:
                 "status": status,
                 "error_type": error_type,
                 "execution_mode": self.service.execution_mode,
+                "worker_id": worker["id"],
+                "role": worker["assignment"]["role"],
             },
         )
 
@@ -235,7 +220,6 @@ class AssessmentCoordinator:
         assessment_id: str,
         *,
         resume: bool = False,
-        required_capabilities: list[dict] | None = None,
         private_terms: tuple[str, ...] | None = None,
     ):
         async with self.state.execution_lock(owner, assessment_id):
@@ -250,31 +234,69 @@ class AssessmentCoordinator:
             if resume:
                 await self._stop_machines(owner, assessment_id)
             plan = await asyncio.to_thread(
-                self._plan,
-                owner,
-                assessment_id,
-                current["brief"],
-                required_capabilities,
-                private_terms,
+                self._plan, owner, assessment_id, current["brief"], private_terms
             )
             case = await asyncio.to_thread(self.service.begin, owner, assessment_id, resume=resume)
             generation = case["generation"]
             self._tasks[(owner, assessment_id)] = asyncio.current_task()
             try:
+                await self._index(owner, assessment_id, generation, plan)
+                slots = asyncio.Semaphore(self.concurrency)
+
+                async def bounded(unit, checkpointer):
+                    async with slots:
+                        return await self._run_unit(
+                            owner, assessment_id, generation, unit, plan, checkpointer
+                        )
+
                 async with checkpoint_store(
                     self.checkpoint_dsn, application_dsn=self.application_dsn
                 ) as checkpointer:
                     for stage in plan["stages"]:
-                        async with asyncio.TaskGroup() as tasks:
-                            for role in stage:
-                                tasks.create_task(
-                                    self._run_role(
-                                        owner, assessment_id, generation, role, plan, checkpointer
-                                    )
+                        # Let siblings finish when one unit fails: cancelling them mid-call
+                        # strands their dispatches and discards their progress.
+                        outcomes = await asyncio.gather(
+                            *(bounded(unit, checkpointer) for unit in stage),
+                            return_exceptions=True,
+                        )
+                        failures = [item for item in outcomes if isinstance(item, BaseException)]
+                        if failures:
+                            raise BaseExceptionGroup("Assessment stage did not complete.", failures)
+                        if stage == ["screen"]:
+                            screen = await asyncio.to_thread(
+                                self.service.screening, owner, assessment_id
+                            )
+                            if screen.recommendation != "deepen":
+                                return await asyncio.to_thread(
+                                    self.service.finalize_screen, owner, assessment_id, generation
                                 )
-                return await asyncio.to_thread(
-                    self.service.finalize, owner, assessment_id, generation
+                creation = asyncio.create_task(
+                    asyncio.to_thread(
+                        SmolSandbox.create,
+                        f"condere-report-{assessment_id}-{generation}",
+                        self.image,
+                        self.artifacts / assessment_id / f"report-{generation}",
+                    )
                 )
+                try:
+                    report_sandbox = await asyncio.shield(creation)
+                except asyncio.CancelledError:
+                    report_sandbox = await creation
+                    await asyncio.to_thread(report_sandbox.close)
+                    raise
+                rendered = False
+                try:
+                    dossier = await asyncio.to_thread(
+                        self.service.finalize,
+                        owner,
+                        assessment_id,
+                        generation,
+                        sandbox=report_sandbox,
+                    )
+                    rendered = True
+                    return dossier
+                finally:
+                    await asyncio.to_thread(report_sandbox.close, delete=rendered)
             except BaseException:
                 try:
                     await asyncio.to_thread(
@@ -286,23 +308,113 @@ class AssessmentCoordinator:
             finally:
                 self._tasks.pop((owner, assessment_id), None)
 
-    async def _run_role(self, owner, assessment_id, generation, role, plan, checkpointer):
-        previous = await asyncio.to_thread(self._completed_role, owner, assessment_id, role)
+    def _worker_trace(self, worker, assessment_id, generation, brief, indexes):
+        if self.tracing is None:
+            return contextlib.nullcontext(WorkerTrace())
+        assignment = worker["assignment"]
+        question = assignment["question_ids"][0] if assignment["role"] in STAGE_ROLES else None
+        return self.tracing.worker(
+            "condere." + assignment["role"],
+            inputs={
+                "brief": brief,
+                "question_id": question,
+                "question": QUESTIONS[question]["question"] if question else None,
+                "repositories": [
+                    {"repository": item["repository"], "commit": item["commit"]} for item in indexes
+                ],
+            },
+            metadata={
+                "assessment_id": assessment_id,
+                "worker_id": worker["id"],
+                "generation": generation,
+                "role": assignment["role"],
+                "question_id": question,
+                "skills": assignment["skills"],
+                "execution_mode": self.service.execution_mode,
+            },
+            tags=["condere", assignment["role"], question or assignment["role"]],
+        )
+
+    async def _index(self, owner, assessment_id, generation, plan):
+        """Deterministically index each admitted repository once, before any model work."""
+        indexed = {
+            item["payload"]["repository"]
+            for item in await asyncio.to_thread(
+                self.state.records, owner, assessment_id, kind="repository_index"
+            )
+        }
+        pending = [url for url in plan["repository_candidates"][:3] if url not in indexed]
+        if not pending:
+            return
+        creation = asyncio.create_task(
+            asyncio.to_thread(
+                SmolSandbox.create,
+                f"condere-index-{assessment_id}-{generation}",
+                self.image,
+                self.artifacts / assessment_id / f"index-{generation}",
+            )
+        )
+        try:
+            sandbox = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            sandbox = await creation
+            await asyncio.to_thread(sandbox.close)
+            raise
+        succeeded = False
+        try:
+            for url in pending:
+                snapshot = await asyncio.to_thread(
+                    pinned_snapshot,
+                    self.state,
+                    owner,
+                    assessment_id,
+                    generation,
+                    url,
+                    {"basis": "reference supplied in the admitted brief"},
+                    self.artifacts / assessment_id / "repositories",
+                )
+                files = await asyncio.to_thread(build_index, snapshot, sandbox)
+                record = await asyncio.to_thread(
+                    save_index, self.service.evidence, owner, assessment_id, snapshot, files
+                )
+                try:
+                    metadata = await asyncio.to_thread(github_metadata, url)
+                    record["metadata_source_id"] = await asyncio.to_thread(
+                        save_metadata, self.service.evidence, owner, assessment_id, metadata
+                    )
+                except httpx.HTTPError as error:
+                    record["metadata_limitation"] = (
+                        f"GitHub metadata unavailable ({type(error).__name__})."
+                    )
+                await asyncio.to_thread(
+                    self.state.append_record,
+                    owner,
+                    assessment_id,
+                    "repository_index",
+                    snapshot.identity,
+                    record,
+                )
+            succeeded = True
+        finally:
+            await asyncio.to_thread(sandbox.close, delete=succeeded)
+
+    async def _run_unit(self, owner, assessment_id, generation, unit, plan, checkpointer):
+        previous = await asyncio.to_thread(self._completed_unit, owner, assessment_id, unit)
         if previous is not None:
             return previous
-        requirements = plan["required_capabilities"] if role == "technical" else None
+        role, _, question = unit.partition(":")
         worker = await asyncio.to_thread(
             self.service.assign_worker,
             owner,
             assessment_id,
             generation,
             role,
-            required_capabilities=requirements,
+            question or None,
         )
         artifact_dir = self.artifacts / assessment_id / worker["id"]
         inputs = self._input_hashes(
             self.service._heads(await asyncio.to_thread(self.state.records, owner, assessment_id)),
-            role,
+            unit,
         )
         creation = asyncio.create_task(
             asyncio.to_thread(
@@ -321,10 +433,26 @@ class AssessmentCoordinator:
                 raise Conflict(
                     "The native VM identity differs from the recorded worker allocation."
                 )
-            context = ProviderContext(self.state, owner, assessment_id, generation, role)
+            indexes = [
+                record["payload"]
+                for record in await asyncio.to_thread(
+                    self.state.records, owner, assessment_id, kind="repository_index"
+                )
+            ]
+            if role != "review":
+                for record in indexes:
+                    await asyncio.to_thread(
+                        install_index, self.service.evidence, owner, assessment_id, record, sandbox
+                    )
+            brief = (await asyncio.to_thread(self.state.get, owner, assessment_id))["brief"]
+            context = ProviderContext(
+                self.state, owner, assessment_id, generation, role, question or None
+            )
             model = (
                 self._model_factory(context)
                 if self._model_factory
+                else plan_model(context, self.plan_credentials)
+                if self.plan_credentials is not None
                 else accounted_model(context, self._router_key)
             )
             if role != "review" and self.service.execution_mode == "live":
@@ -334,21 +462,55 @@ class AssessmentCoordinator:
                     self._exa_key,
                     private_terms=tuple(plan["private_terms"]),
                 )
-            completed = await run_worker(
-                self.service,
-                owner=owner,
-                assessment_id=assessment_id,
-                generation=generation,
-                role=role,
-                sandbox=sandbox,
-                model=model,
-                checkpointer=checkpointer,
-                research=research,
-                repository_cache=self.artifacts / assessment_id / "repositories",
-                allowed_repositories=set(plan["repository_candidates"]),
-                required_capabilities=requirements,
-                callbacks=self.callbacks,
-            )
+            worker_trace = WorkerTrace()
+            try:
+                with self._worker_trace(
+                    worker, assessment_id, generation, brief, indexes
+                ) as worker_trace:
+                    completed = await run_worker(
+                        self.service,
+                        owner=owner,
+                        assessment_id=assessment_id,
+                        generation=generation,
+                        role=role,
+                        sandbox=sandbox,
+                        model=model,
+                        checkpointer=checkpointer,
+                        research=research,
+                        repository_cache=self.artifacts / assessment_id / "repositories",
+                        allowed_repositories=set(plan["repository_candidates"]),
+                        question_id=question or None,
+                        callbacks=self.callbacks,
+                    )
+                    accepted = self.service._heads(
+                        await asyncio.to_thread(self.state.records, owner, assessment_id)
+                    )
+                    answer = {
+                        key: accepted[key]["payload"]
+                        for key in completed["completion"]["accepted_hashes"]
+                    }
+                    worker_trace.outputs(answer)
+                    if (
+                        self.tracing is not None
+                        and role in STAGE_ROLES
+                        and self.service.execution_mode == "live"
+                    ):
+                        await asyncio.to_thread(self.tracing.record_example, worker_trace, answer)
+            finally:
+                # Check presence after the root run closes; a missing trace is never a zero charge.
+                if self.tracing is not None:
+                    try:
+                        await asyncio.to_thread(
+                            self._record_telemetry,
+                            owner,
+                            assessment_id,
+                            worker,
+                            worker_trace.trace_id,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "Worker telemetry status could not be saved."
+                        )
             exported = await asyncio.to_thread(
                 sandbox.download_files, [worker["assignment"]["output_path"]]
             )
@@ -388,7 +550,7 @@ class AssessmentCoordinator:
         finally:
             if research is not None:
                 research.close()
-            if isinstance(model, AccountedChatOpenAI):
+            if isinstance(model, (AccountedChatOpenAI, PlanChatOpenAI)):
                 await asyncio.to_thread(model.root_client.close)
                 await model.root_async_client.close()
             await asyncio.to_thread(sandbox.close, delete=succeeded)

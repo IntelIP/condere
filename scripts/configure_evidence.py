@@ -5,7 +5,7 @@ import json
 import secrets
 
 from botocore.exceptions import BotoCoreError, ClientError
-from configure_langfuse import doppler
+from doppler_config import doppler
 
 from condere.runtime.evidence import object_client
 

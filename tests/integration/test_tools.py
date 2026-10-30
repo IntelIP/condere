@@ -51,8 +51,8 @@ def tool_case(setup_case, tmp_path, monkeypatch):
         requests.append(json.loads(request.content))
         return httpx.Response(200, json=research_response())
 
-    def build(role):
-        assigned = worker(service, owner, case, role)
+    def build(role, question_id=None):
+        assigned = worker(service, owner, case, role, question_id)
         sandbox = SimpleNamespace(id=assigned["machine_id"])
         research = None
         if role != "review":
@@ -83,11 +83,12 @@ def tool_case(setup_case, tmp_path, monkeypatch):
 
 def test_research_to_citation_and_assigned_submission(tool_case):
     service, owner, case, build, requests = tool_case
-    tools, _, _ = build("market")
+    tools, _, _ = build("market", "M1")
     assert "submit_question" in tools
-    assert not {"submit_technical", "submit_review"} & tools.keys()
+    assert not {"submit_review", "inspect_repository"} & tools.keys()
     context = tools["read_assessment"].invoke({})
     assert context["submission_schema"]["title"] == "QuestionAnswer"
+    assert list(context["question_contracts"]) == ["M1"]
     assert context["brief"]["original_input"].startswith("  Assess")
     request = {"query": "public technology alternatives", "material_gap": "Missing comparator"}
     found = tools["search_public"].invoke(request)
@@ -128,7 +129,7 @@ def test_reviewer_reads_full_saved_evidence_without_research_tools(tool_case):
     )
     context = tools["read_assessment"].invoke({})
     assert context["submission_schema"]["title"] == "FinalReview"
-    assert len(context["review_context"]["reviewed_hashes"]) == 18
+    assert len(context["review_context"]["reviewed_hashes"]) == 26
     raw = "Long fictional evidence. " * 1500
     source = service.evidence.save_source(
         owner,
@@ -153,7 +154,7 @@ def test_reviewer_reads_full_saved_evidence_without_research_tools(tool_case):
 
 def test_calculation_preserves_decimals_unknowns_and_receipt_requirements(tool_case):
     service, owner, case, build, _ = tool_case
-    tools, _, _ = build("business")
+    tools, _, _ = build("business", "B3")
     calculation = {
         "id": "fictional-cost",
         "scenario": "single",
@@ -200,7 +201,7 @@ def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
     tool_case, tmp_path, monkeypatch
 ):
     service, owner, case, build, _ = tool_case
-    tools, _, sandbox = build("technical")
+    tools, _, sandbox = build("technical", "T2")
     content = b"Fictional repository README."
     archive = tmp_path / "simulated.tar.gz"
     archive.write_bytes(b"Simulated archive; this is not a native repository test.")
@@ -224,7 +225,7 @@ def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
         commits.append(kwargs["commit"])
         return replace(snapshot, repository=url)
 
-    monkeypatch.setattr("condere.runtime.tools.acquire_repository", acquire)
+    monkeypatch.setattr("condere.runtime.indexing.acquire_repository", acquire)
     monkeypatch.setattr(
         "condere.runtime.tools.stage_repository",
         lambda *_: {

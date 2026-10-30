@@ -5,6 +5,7 @@ verification remains a separate deployment step; this module never provisions it
 """
 
 import hashlib
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -19,9 +20,8 @@ from condere.runtime.contracts import (
     AssessmentFindings,
     Citation,
     Finding,
-    Metric,
+    OpportunityScreen,
     QuestionAnswer,
-    TechnicalReport,
 )
 from condere.runtime.state import AssessmentStore, NotFound, content_hash
 
@@ -36,7 +36,14 @@ class EvidenceError(Exception):
 
 class SourceDocument(Record):
     id: Digest
-    kind: Literal["web", "repository", "user_file", "measurement"]
+    kind: Literal[
+        "web",
+        "repository",
+        "repository_index",
+        "repository_metadata",
+        "user_file",
+        "measurement",
+    ]
     origin: Text
     retrieved_at: AwareDatetime
     media_type: Text
@@ -75,7 +82,7 @@ def object_client(environment: dict[str, str]):
 
 class EvidenceStore:
     def __init__(self, state: AssessmentStore, client, bucket: str):
-        if not bucket or bucket == "langfuse":
+        if not bucket:
             raise ValueError("Assessment evidence requires a dedicated bucket.")
         self.state, self.client, self.bucket = state, client, bucket
 
@@ -216,11 +223,61 @@ class EvidenceStore:
             "total_characters": len(text),
         }
 
+    def resolve_citations(self, owner: str, assessment_id: str, payload):
+        """Fill each citation's hash and offsets from its source ID and exact quoted text.
+
+        Models quote evidence; code locates it. Whitespace may differ between the quote and
+        the source, but the saved citation always carries the source's exact text.
+        """
+        if isinstance(payload, list):
+            return [self.resolve_citations(owner, assessment_id, item) for item in payload]
+        if not isinstance(payload, dict):
+            return payload
+        resolved = {}
+        for key, value in payload.items():
+            if key == "citations" and isinstance(value, list):
+                resolved[key] = [self._resolve(owner, assessment_id, item) for item in value]
+            else:
+                resolved[key] = self.resolve_citations(owner, assessment_id, value)
+        return resolved
+
+    def _resolve(self, owner: str, assessment_id: str, citation):
+        if not isinstance(citation, dict) or not isinstance(citation.get("quote"), str):
+            return citation
+        source_id, quote = citation.get("source_id"), citation["quote"]
+        source = self.source(owner, assessment_id, source_id)
+        text = self.text(owner, assessment_id, source_id)
+        start = citation.get("start")
+        if isinstance(start, int) and 0 <= start and text[start : start + len(quote)] == quote:
+            match = (start, start + len(quote))
+        elif (index := text.find(quote)) >= 0:
+            match = (index, index + len(quote))
+        else:
+            words = quote.split()
+            found = (
+                re.search(r"\s+".join(re.escape(word) for word in words), text) if words else None
+            )
+            if found is None:
+                raise EvidenceError(
+                    f"The quoted text was not found in source {source_id}. Copy an exact "
+                    "passage from read_source or search_saved_sources."
+                )
+            match = found.span()
+        return citation | {
+            "text_sha256": source.text_sha256,
+            "start": match[0],
+            "end": match[1],
+            "quote": text[match[0] : match[1]],
+        }
+
     def verify_citation(self, owner: str, assessment_id: str, citation: Citation) -> None:
         source = self.source(owner, assessment_id, citation.source_id)
         text = self.text(owner, assessment_id, citation.source_id)
         if (
-            source.text_sha256 != citation.text_sha256
+            citation.text_sha256 is None
+            or citation.start is None
+            or citation.end is None
+            or source.text_sha256 != citation.text_sha256
             or citation.end > len(text)
             or text[citation.start : citation.end] != citation.quote
         ):
@@ -230,7 +287,7 @@ class EvidenceStore:
         self,
         owner: str,
         assessment_id: str,
-        findings: AssessmentFindings | TechnicalReport | QuestionAnswer,
+        findings: AssessmentFindings | QuestionAnswer | OpportunityScreen,
     ) -> None:
         """Check all references; semantic support remains the final reviewer's responsibility."""
         receipts = {
@@ -249,20 +306,21 @@ class EvidenceStore:
                 and receipt.get("original_sha256") == source.original_sha256
             )
 
-        technical = (
-            findings.technical
-            if isinstance(findings, AssessmentFindings)
-            else (findings if isinstance(findings, TechnicalReport) else None)
-        )
-        statements: list[Finding | Metric] = (
+        statements: list[Finding] = (
             list(findings.questions)
             if isinstance(findings, AssessmentFindings)
             else ([findings] if isinstance(findings, QuestionAnswer) else [])
         )
-        if technical is not None:
-            statements.extend(technical.findings.values())
-            statements.extend(item.finding for item in technical.capabilities)
-            statements.extend(technical.metrics)
+        if isinstance(findings, OpportunityScreen):
+            for candidate in findings.candidates:
+                statements.extend(
+                    [
+                        candidate.problem,
+                        candidate.commercial_evidence,
+                        candidate.alternatives,
+                    ]
+                )
+            statements.extend(findings.contrary_evidence)
         for source_id in {
             source_id for statement in statements for source_id in statement.source_ids
         }:
@@ -274,14 +332,7 @@ class EvidenceStore:
                 measured_source(source_id) for source_id in statement.source_ids
             ):
                 raise EvidenceError("Measured findings need a protected, source-bound receipt.")
-            calculations = (
-                statement.calculations
-                if hasattr(statement, "calculations")
-                else [statement.calculation]
-                if isinstance(statement, Metric) and statement.calculation
-                else []
-            )
-            for calculation in calculations:
+            for calculation in getattr(statement, "calculations", []):
                 for item in calculation.inputs:
                     if not set(item.source_ids).issubset(statement.source_ids):
                         raise EvidenceError(
@@ -293,39 +344,3 @@ class EvidenceStore:
                         measured_source(source_id) for source_id in item.source_ids
                     ):
                         raise EvidenceError("Measured calculation inputs need protected receipts.")
-        for metric in technical.metrics if technical is not None else []:
-            if metric.basis == "measured":
-                expected = metric.model_dump(
-                    mode="json",
-                    include={
-                        "scenario",
-                        "subject",
-                        "name",
-                        "value",
-                        "unit",
-                        "product_version",
-                        "conditions",
-                    },
-                )
-                if receipts.get(metric.receipt_id, {}).get("metric") != expected or not any(
-                    measured_source(source_id, metric.receipt_id) for source_id in metric.source_ids
-                ):
-                    raise EvidenceError(
-                        "A measured metric lacks a matching protected execution receipt."
-                    )
-        inspections = {
-            record["record_key"]: record["payload"]
-            for record in self.state.records(owner, assessment_id, kind="repository_inspection")
-        }
-        for inspection in technical.repositories if technical is not None else []:
-            source = self.source(owner, assessment_id, inspection.archive_source_id)
-            if (
-                source.kind != "repository"
-                or source.original_sha256 != inspection.archive_sha256
-                or source.provenance.get("commit") != inspection.commit
-                or inspections.get(inspection.receipt_id) != inspection.model_dump(mode="json")
-            ):
-                raise EvidenceError(
-                    "Repository inspection needs its admitted archive and saved receipt."
-                )
-            self.original(owner, assessment_id, source.id)

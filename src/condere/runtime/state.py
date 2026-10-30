@@ -18,7 +18,7 @@ from psycopg.types.json import Jsonb
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS campaigns (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
-    cap_microusd BIGINT NOT NULL CHECK (cap_microusd >= 0),
+    cap_microusd BIGINT CHECK (cap_microusd >= 0),
     assessment_limit INTEGER NOT NULL CHECK (assessment_limit > 0),
     authorization_basis JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -140,18 +140,24 @@ class AssessmentStore:
         with self.connection() as connection:
             connection.execute("SELECT pg_advisory_xact_lock(20261021, 4)")
             connection.execute(SCHEMA)
+            # Owner decision 2026-10-28: a campaign may be uncapped; charges are still recorded.
+            connection.execute("ALTER TABLE campaigns ALTER COLUMN cap_microusd DROP NOT NULL")
 
     def authorize_campaign(
         self,
         owner: str,
         campaign_id: str,
-        cap_microusd: int,
+        cap_microusd: int | None,
         authorization: dict,
         *,
         assessment_limit: int = 1,
     ) -> dict:
-        """Operator-only registration, never an intake field or agent tool."""
-        money(cap_microusd)
+        """Operator-only registration, never an intake field or agent tool.
+
+        A None cap records every reservation and charge without stopping work on spend.
+        """
+        if cap_microusd is not None:
+            money(cap_microusd)
         if not owner or not campaign_id or not authorization or assessment_limit < 1:
             raise ValueError("Campaign needs owner, identity, authorization, and a positive limit.")
         with self.connection() as connection:
@@ -210,7 +216,14 @@ class AssessmentStore:
         cap = connection.execute(
             "SELECT cap_microusd FROM campaigns WHERE id=%s", (campaign_id,)
         ).fetchone()["cap_microusd"]
-        return {"cap_microusd": cap, **totals, "available_microusd": cap - sum(totals.values())}
+        available = None if cap is None else cap - sum(totals.values())
+        return {"cap_microusd": cap, **totals, "available_microusd": available}
+
+    @staticmethod
+    def _exceeds(budget: dict, additional: int = 0) -> bool:
+        return (
+            budget["available_microusd"] is not None and additional > budget["available_microusd"]
+        )
 
     def admit(
         self,
@@ -301,7 +314,7 @@ class AssessmentStore:
                 raise RecoveryRequired(
                     "Reconcile uncertain dispatched operations before continuing."
                 )
-            if self._budget(connection, assessment["campaign_id"])["available_microusd"] < 0:
+            if self._exceeds(self._budget(connection, assessment["campaign_id"])):
                 raise BudgetExceeded("Recorded liabilities exceed the original campaign allowance.")
             return connection.execute(
                 """UPDATE assessments SET status='running',generation=generation+1,updated_at=now()
@@ -381,10 +394,7 @@ class AssessmentStore:
                     )
                 if existing["state"] != "released":
                     return existing
-            if (
-                max_microusd
-                > self._budget(connection, assessment["campaign_id"])["available_microusd"]
-            ):
+            if self._exceeds(self._budget(connection, assessment["campaign_id"]), max_microusd):
                 raise BudgetExceeded("Reservation would exceed the campaign's remaining allowance.")
             if existing:
                 return connection.execute(
@@ -432,7 +442,7 @@ class AssessmentStore:
                 raise Conflict(
                     "Operation cannot dispatch again; retrieve or reconcile its saved state."
                 )
-            if self._budget(connection, assessment["campaign_id"])["available_microusd"] < 0:
+            if self._exceeds(self._budget(connection, assessment["campaign_id"])):
                 raise BudgetExceeded("Pending and settled costs exceed the campaign allowance.")
             return connection.execute(
                 """UPDATE operations SET state='dispatched',dispatch_identity=%s,
@@ -490,7 +500,7 @@ class AssessmentStore:
                     operation_id,
                 ),
             ).fetchone()
-            if self._budget(connection, assessment["campaign_id"])["available_microusd"] < 0:
+            if self._exceeds(self._budget(connection, assessment["campaign_id"])):
                 self._stop(connection, assessment_id, "interrupted")
             return saved
 
@@ -520,7 +530,7 @@ class AssessmentStore:
                    WHERE id=%s RETURNING *""",
                 (actual_microusd, Jsonb(basis), operation_id),
             ).fetchone()
-            if self._budget(connection, assessment["campaign_id"])["available_microusd"] < 0:
+            if self._exceeds(self._budget(connection, assessment["campaign_id"])):
                 self._stop(connection, assessment_id, "interrupted")
             return saved
 
@@ -553,9 +563,8 @@ class AssessmentStore:
                    WHERE id=%s RETURNING *""",
                 (bound, Jsonb(reconciliation), operation_id),
             ).fetchone()
-            if (
-                bound > operation["reserved_microusd"]
-                or self._budget(connection, assessment["campaign_id"])["available_microusd"] < 0
+            if bound > operation["reserved_microusd"] or self._exceeds(
+                self._budget(connection, assessment["campaign_id"])
             ):
                 self._stop(connection, assessment_id, "interrupted")
             return saved
@@ -596,9 +605,9 @@ class AssessmentStore:
                     raise Conflict("A running assigned worker is required for this submission.")
                 assignment = worker["assignment"]
                 allowed = (
-                    (assignment["role"] == "technical" and (kind, key) == ("technical", "main"))
+                    (assignment["role"] == "screen" and (kind, key) == ("screen", "main"))
                     or (
-                        assignment["role"] in {"market", "business"}
+                        assignment["role"] in {"technical", "market", "business"}
                         and kind == "question"
                         and key in assignment["question_ids"]
                     )
@@ -805,7 +814,8 @@ class AssessmentStore:
                 raise Conflict("Workers must finish before the dossier is delivered.")
             heads = connection.execute(
                 """SELECT DISTINCT ON (kind,record_key) kind,record_key,content_hash
-                   FROM records WHERE assessment_id=%s AND kind IN ('technical','question','review')
+                   FROM records WHERE assessment_id=%s
+                   AND kind IN ('screen','question','review')
                    ORDER BY kind,record_key,version DESC""",
                 (assessment_id,),
             ).fetchall()

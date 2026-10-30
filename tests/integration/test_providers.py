@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from langchain_core.messages import HumanMessage, ToolMessage
 from openai import APITimeoutError, InternalServerError
 from test_evidence import SimulatedObjects
 
@@ -66,29 +67,32 @@ def provider_case(monkeypatch):
 
 
 def completion(*, cost=0.00003075, byok=False):
-    usage = {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}
+    usage = {
+        "input_tokens": 11,
+        "output_tokens": 5,
+        "total_tokens": 16,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0},
+    }
     if cost is not None:
         usage.update(cost=cost, is_byok=byok)
     return {
-        "id": "chatcmpl-simulation",
-        "object": "chat.completion",
-        "created": 1792540800,
+        "id": "resp-simulation",
+        "object": "response",
+        "created_at": 1792540800,
         "model": MODEL_ID,
-        "choices": [
+        "status": "completed",
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [
             {
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call-saved-identity",
-                            "type": "function",
-                            "function": {"name": "record", "arguments": '{"finding":"unknown"}'},
-                        }
-                    ],
-                },
+                "id": "fc-simulation",
+                "call_id": "call-saved-identity",
+                "type": "function_call",
+                "name": "record",
+                "arguments": '{"finding":"unknown"}',
+                "status": "completed",
             }
         ],
         "usage": usage,
@@ -106,7 +110,7 @@ async def test_model_sdk_limits_saved_tool_ids_and_async_accounting(provider_cas
 
     def respond(request):
         requests.append(json.loads(request.content))
-        assert request.url == "https://openrouter.ai/api/v1/chat/completions"
+        assert request.url == "https://openrouter.ai/api/v1/responses"
         assert request.headers["authorization"] == "Bearer fake-router-key"
         return httpx.Response(200, json=completion())
 
@@ -129,10 +133,18 @@ async def test_model_sdk_limits_saved_tool_ids_and_async_accounting(provider_cas
         first = model.invoke("Investigate public alternatives.")
         repeated = await model.ainvoke("Investigate public alternatives.")
         await model.ainvoke("Investigate another public alternative.")
-    assert len(requests) == 2
+        await model.ainvoke(
+            [
+                HumanMessage("Investigate public alternatives."),
+                first,
+                ToolMessage("Saved finding.", tool_call_id="call-saved-identity"),
+            ]
+        )
+    assert len(requests) == 3
+    assert any(item["type"] == "function_call_output" for item in requests[-1]["input"])
     sent = requests[0]
     assert sent["model"] == MODEL_ID
-    assert sent["max_tokens"] == MODEL_OUTPUT_TOKENS
+    assert sent["max_output_tokens"] == MODEL_OUTPUT_TOKENS
     assert "max_completion_tokens" not in sent
     assert sent["stream"] is False
     assert sent["plugins"] == []
@@ -140,8 +152,8 @@ async def test_model_sdk_limits_saved_tool_ids_and_async_accounting(provider_cas
     assert sent["provider"]["allow_fallbacks"] is False
     assert sent["provider"]["require_parameters"] is True
     assert sent["provider"]["max_price"] == {
-        "prompt": 0.75,
-        "completion": 4.5,
+        "prompt": 4,
+        "completion": 15,
         "image": 0,
         "request": 0,
     }
@@ -151,9 +163,9 @@ async def test_model_sdk_limits_saved_tool_ids_and_async_accounting(provider_cas
     assert repeated.response_metadata["condere"]["new_cost_microusd"] == 0
     assert repeated.response_metadata["condere"]["reused"] is True
     saved = operations(context)
-    assert len(saved) == 2
+    assert len(saved) == 3
     assert all(item["actual_microusd"] == 31 for item in saved)
-    assert all(item["reserved_microusd"] == 336_864 for item in saved)
+    assert all(item["reserved_microusd"] == 5_372_880 for item in saved)
     assert "not an invoice" in saved[0]["cost_basis"]["basis"]
 
 
@@ -162,6 +174,9 @@ async def test_model_sdk_limits_saved_tool_ids_and_async_accounting(provider_cas
     [
         {"max_tokens": MODEL_OUTPUT_TOKENS + 1},
         {"max_completion_tokens": MODEL_OUTPUT_TOKENS + 1},
+        {"max_output_tokens": MODEL_OUTPUT_TOKENS + 1},
+        {"store": True},
+        {"previous_response_id": "resp-unrecorded-input"},
         {"extra_body": {"plugins": [{"id": "web"}]}},
         {"tools": [{"type": "web_search"}]},
         {"n": 2},
@@ -193,7 +208,7 @@ def test_model_missing_or_byok_cost_keeps_reservation_pending(provider_case, cos
     assert saved["actual_microusd"] is None
     assert (
         context.state.spending(context.owner, context.assessment_id)["budget"]["pending_microusd"]
-        == 336_864
+        == 5_372_880
     )
 
 

@@ -7,7 +7,7 @@ developer preview. API, Codex, and Claude Code are access paths to the same save
 assessment.
 
 The owner's chosen infrastructure is open-source Deep Agents with self-hosted
-Langfuse and SmolVM. Preserve assessment-specific user constraints rather than
+SmolVM and hosted LangSmith tracing. Preserve assessment-specific user constraints rather than
 assuming every proposed product should use Condere's infrastructure.
 
 No default customer, revenue target, staff budget, price, or measured business

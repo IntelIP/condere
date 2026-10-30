@@ -7,9 +7,10 @@ from pathlib import Path
 from langchain_core.language_models import BaseChatModel
 
 from condere.runtime.agent import build_agent
+from condere.runtime.chatgpt_plan import PlanChatOpenAI
 from condere.runtime.providers import AccountedChatOpenAI, ExaResearch
 from condere.runtime.sandbox import SmolSandbox
-from condere.runtime.service import AssessmentService
+from condere.runtime.service import AssessmentService, output_keys
 from condere.runtime.state import Conflict
 from condere.runtime.tools import worker_tools
 
@@ -27,14 +28,14 @@ async def run_worker(
     research: ExaResearch | None,
     repository_cache: Path,
     allowed_repositories: set[str],
-    required_capabilities: list[dict] | None = None,
+    question_id: str | None = None,
     callbacks: list | None = None,
 ) -> dict:
     """Complete one assignment; the coordinator owns scheduling, cancellation, and VM lifecycle."""
     if checkpointer is None:
         raise ValueError("An assessment worker requires a durable checkpointer.")
     if service.execution_mode == "live":
-        if not isinstance(model, AccountedChatOpenAI):
+        if not isinstance(model, (AccountedChatOpenAI, PlanChatOpenAI)):
             raise ValueError("Live workers require the accounted model adapter.")
         context = model._context
         if context.state is not service.state or (
@@ -52,7 +53,7 @@ async def run_worker(
         assessment_id,
         generation,
         role,
-        required_capabilities=required_capabilities,
+        question_id,
     )
     if assigned["status"] == "completed":
         return assigned
@@ -82,19 +83,44 @@ async def run_worker(
             "complete this assignment. Do not create nested workers or request internal-stage "
             "human approval. The trusted application saves the accepted output artifact."
         )
-        if role == "technical":
+        if role in {"technical", "screen"}:
+            # permitted_tools lists Condere's own tools; live workers read it as excluding the
+            # shell and skipped the saved graph (2026-10-28), so state the sandbox tools plainly.
             assignment += (
-                " For the large Technical report, use the sandbox to build a JSON file at "
-                "/workspace/technical-draft.json, reusing complete citation objects and "
-                "checking that the JSON parses. Then call submit_technical with path set "
-                "to that file. This avoids repeatedly copying the full nested report into "
-                "a tool call; all evidence and required-field checks still apply."
+                " Besides the Condere tools listed in your assignment, you may use the sandbox "
+                "tools (execute, ls, read_file, grep, glob) inside /workspace. Run graphify "
+                "query/path/explain against the saved index graph listed in read_assessment "
+                "under repository_indexes, and grep the staged repository, before reading "
+                "whole files."
+            )
+        if role in {"technical", "market", "business"}:
+            assignment += (
+                f" You answer exactly one question, {question_id}; its contract and research "
+                "guide are in read_assessment under question_contracts. Load the skills named "
+                "in your assignment. Cite evidence with source_id and the exact quoted text "
+                "copied from read_source or search_saved_sources; the application fills in "
+                "hashes and offsets. For a long answer, build JSON at /workspace/answer.json "
+                "and call submit_question with path set to that file. Repeated rejected "
+                "submissions stop the worker, so read each error and fix its cause."
+            )
+        if role == "screen":
+            assignment += (
+                " This is opportunity qualification, not the full 17-question assessment. "
+                "Use opportunity-framing. Compare plausible uses before choosing a customer. "
+                "Research firsthand problems, existing paid workarounds, and contrary cases. "
+                "Read exact source passages; technology documentation alone is not buyer evidence. "
+                "Submit the opportunity screen with executable next checks. Deepen only when "
+                "a named investigation can change the decision and the agent can execute it now. "
+                "Distinguish customer input and human actions from public research. Do not defer "
+                "retrievable facts to the user. Do not manufacture missing commercial facts. "
+                "You may build /workspace/screen.json and pass its path to submit_screen."
             )
         agent = await asyncio.to_thread(
             build_agent,
             model,
             sandbox,
             assignment=assignment,
+            skills=assigned["assignment"]["skills"],
             tools=tools,
             checkpointer=checkpointer,
         )
@@ -106,6 +132,7 @@ async def run_worker(
                 "worker_id": assigned["id"],
                 "generation": generation,
                 "role": role,
+                "question_id": question_id,
             },
             "callbacks": callbacks or [],
         }
@@ -117,19 +144,16 @@ async def run_worker(
                 else {
                     "messages": [
                         {"role": "user", "content": "Complete your trusted Condere assignment."}
-                    ]
+                    ],
+                    # One question per worker: load its methods up front instead of hoping
+                    # the model opens them (Deep Agents skill pinning).
+                    "pinned_skills": assigned["assignment"]["skills"],
                 },
                 config=config,
             )
         await asyncio.to_thread(service._worker, owner, assessment_id, generation, assigned["id"])
         heads = service._heads(await asyncio.to_thread(service.state.records, owner, assessment_id))
-        keys = (
-            ["technical:main"]
-            if role == "technical"
-            else ["review:final"]
-            if role == "review"
-            else ["question:" + identity for identity in assigned["assignment"]["question_ids"]]
-        )
+        keys = output_keys(assigned["assignment"])
         if any(key not in heads for key in keys):
             raise Conflict("The worker ended without submitting every assigned result.")
         artifact = {

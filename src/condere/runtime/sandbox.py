@@ -5,13 +5,11 @@ import json
 import re
 import threading
 import uuid
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from deepagents.backends.protocol import ExecuteResponse, FileDownloadResponse, FileUploadResponse
 from deepagents.backends.sandbox import BaseSandbox
-from langfuse import Langfuse
 from smol import ConnectOptions, ExecOptions, Machine, MachineConfig, ResourceSpec
 
 _READ_FILE = """
@@ -50,14 +48,12 @@ class SmolSandbox(BaseSandbox):
         machine: Machine,
         artifact_dir: Path,
         *,
-        telemetry: Langfuse | None = None,
         output_limit: int = 2 * 1024 * 1024,
         file_limit: int = 4 * 1024 * 1024,
     ) -> None:
         self.machine = machine
         self.artifact_dir = artifact_dir.resolve()
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        self.telemetry = telemetry
         self.output_limit = output_limit
         self.file_limit = file_limit
         self._command_lock = threading.Lock()
@@ -104,17 +100,10 @@ class SmolSandbox(BaseSandbox):
         if not 1 <= timeout <= 300:
             raise ValueError("Sandbox command timeout must be between 1 and 300 seconds.")
         artifact = self.artifact_dir / f"{uuid.uuid4().hex}.txt"
-        context = (
-            self.telemetry.start_as_current_observation(
-                name="smolvm.execute", as_type="tool", metadata={"machine_id": self.id}
-            )
-            if self.telemetry
-            else nullcontext()
-        )
         data = bytearray()
         exit_code = None
         truncated = False
-        with self._command_lock, context as span:
+        with self._command_lock:
             try:
                 with self.machine.exec_stream(
                     ["/bin/sh", "-c", command],
@@ -135,16 +124,9 @@ class SmolSandbox(BaseSandbox):
                         elif event["kind"] == "error":
                             data.extend(b"\nSandbox command failed.\n")
                             exit_code = 1
-                if span:
-                    span.update(
-                        output={"exit_code": exit_code, "artifact": artifact.name},
-                        level="DEFAULT" if exit_code == 0 else "ERROR",
-                    )
             except Exception as exc:
                 data.extend(f"\nSandbox execution failed ({type(exc).__name__}).\n".encode())
                 exit_code = 1
-                if span:
-                    span.update(level="ERROR", status_message=type(exc).__name__)
             finally:
                 self._stream = None
                 artifact.write_bytes(bytes(data[: self.output_limit]))

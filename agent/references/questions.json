@@ -1,4 +1,311 @@
 {
+  "T1": {
+    "id": "T1",
+    "stage": "technical",
+    "question": "How does the technology work?",
+    "required_fields": [
+      "components",
+      "data_flow",
+      "core_technology",
+      "entry_points",
+      "state_and_storage"
+    ],
+    "completion_rule": "Describe the actual components and request/data path from cited code or official documentation; separate observed structure from inferred design.",
+    "allow_unavailable": false,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "modelled"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "architecture-analysis",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Establish what the system is made of and how work moves through it, as the basis for every hosting and product judgment.",
+      "evidence_needed": "Repository index facts and graph hubs, entry points, main modules and the files that implement them; official architecture documentation where code is unavailable.",
+      "search_routes": [
+        "Start from the repository index: languages, entry points, graph hubs and directory layout.",
+        "Follow callers and imports from each entry point to storage, network and background-work code; read the implementing files."
+      ],
+      "weak_signals": "File names, README marketing language and graph edges alone describe intent, not behavior.",
+      "completion": "Name each major component, its responsibility and the path between them with file-level citations; label any inferred link."
+    }
+  },
+  "T2": {
+    "id": "T2",
+    "stage": "technical",
+    "question": "How is it built, packaged and deployed?",
+    "required_fields": [
+      "packaging",
+      "runtime_requirements",
+      "deployment_methods",
+      "configuration",
+      "stateful_services"
+    ],
+    "completion_rule": "Report each supported way to run it, its required runtime and services, and its configuration from cited build and deployment files.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "deployment-analysis",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Determine what it takes to run the technology, which is what a hosted offering would take over.",
+      "evidence_needed": "Dockerfiles, Compose files, Helm charts, Kubernetes manifests, Terraform, platform configs, build scripts, release artifacts and installation documentation.",
+      "search_routes": [
+        "Read every deployment artifact the repository index lists; confirm images, ports, volumes and required services.",
+        "Read installation and self-hosting documentation and compare it with the deployment files."
+      ],
+      "weak_signals": "A Dockerfile proves a container build exists, not that it is production-ready; absent files do not prove a method is unsupported.",
+      "completion": "List each deployment method with its requirements, configuration surface and stateful services, citing the files; state which methods are documented versus only present."
+    }
+  },
+  "T3": {
+    "id": "T3",
+    "stage": "technical",
+    "question": "What does it depend on?",
+    "required_fields": [
+      "runtime_dependencies",
+      "external_services",
+      "dependency_licenses",
+      "supply_chain_risks"
+    ],
+    "completion_rule": "Separate bundled libraries from required external services; tie license and risk statements to cited manifests or sources.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "dependency-analysis",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Identify what the technology needs to function and what that implies for hosting cost, licensing and risk.",
+      "evidence_needed": "Dependency manifests and lockfiles, imported service SDKs, required databases/queues/caches, and license metadata for material dependencies.",
+      "search_routes": [
+        "Start from the index's parsed manifests and dependency signals; read the manifests for versions.",
+        "Check material dependencies' license and maintenance status from their official repositories or registries."
+      ],
+      "weak_signals": "A dependency listed in a manifest may be optional, development-only or unused; package popularity is not suitability.",
+      "completion": "Name the material runtime dependencies and external services, with licenses and risks cited; mark optional and development-only dependencies."
+    }
+  },
+  "T4": {
+    "id": "T4",
+    "stage": "technical",
+    "question": "What does it integrate with, and how can it be extended?",
+    "required_fields": [
+      "interfaces",
+      "integrations",
+      "extension_points",
+      "protocols_and_formats"
+    ],
+    "completion_rule": "Cite the actual APIs, SDKs, plugins, protocols and data formats; distinguish implemented integrations from documented plans.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "integration-analysis",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Determine how customers would connect the technology to their systems and where a product could add value.",
+      "evidence_needed": "Public API routes, CLI commands, SDKs, plugin or extension mechanisms, supported protocols and file formats, and integration code for third-party services.",
+      "search_routes": [
+        "Locate route definitions, CLI entry points and plugin registries through the index and graph; read their implementations.",
+        "Read official integration documentation and compare it with the implemented code."
+      ],
+      "weak_signals": "Roadmap items, issues and README badges are not implemented integrations.",
+      "completion": "List interfaces, integrations and extension points with citations, separating implemented from planned."
+    }
+  },
+  "T5": {
+    "id": "T5",
+    "stage": "technical",
+    "question": "What is hard about operating it?",
+    "required_fields": [
+      "operational_tasks",
+      "scaling_characteristics",
+      "failure_and_recovery",
+      "security_operations",
+      "hosting_value"
+    ],
+    "completion_rule": "Ground each operational burden in cited code, configuration or documentation; the hosting value must follow from burdens the evidence shows.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "measured",
+      "modelled"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "operations-analysis",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Find the operational work customers would pay a host to remove: this is the core of an infrastructure-and-hosting business.",
+      "evidence_needed": "State and storage handling, upgrade and migration procedures, backup and restore, scaling and concurrency limits, configuration complexity, security patching, and maintainers' operational guidance or user-reported operating problems.",
+      "search_routes": [
+        "Read migration, backup, scaling and upgrade code and documentation identified by the index.",
+        "Search public issues and discussions for operators' reported problems with running it in production."
+      ],
+      "weak_signals": "Isolated complaints, unmeasured performance claims and generic 'ops is hard' statements are not evidence of a specific burden.",
+      "completion": "Name each concrete operating burden with evidence and state which ones a hosted offering would credibly remove."
+    }
+  },
+  "T6": {
+    "id": "T6",
+    "stage": "technical",
+    "question": "May we offer it as a hosted or open-core product?",
+    "required_fields": [
+      "license",
+      "hosting_rights",
+      "contributor_terms",
+      "trademark_and_branding",
+      "commercial_constraints"
+    ],
+    "completion_rule": "Quote the license and related terms; state hosting implications as interpretation, not legal advice, and identify questions that need counsel.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "license-and-hosting-rights",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Determine whether licensing, contributor terms or trademarks permit a hosted or open-core offering.",
+      "evidence_needed": "LICENSE and NOTICE files, per-package license fields, contributor license agreements, trademark policies, and any source-available or field-of-use restrictions such as AGPL network clauses, SSPL or BSL.",
+      "search_routes": [
+        "Read license files and license fields listed by the repository index.",
+        "Read the project's trademark, contribution and commercial-use policies from official sources."
+      ],
+      "weak_signals": "A permissive top-level license does not cover every bundled component; absence of a trademark policy is not permission to use the name.",
+      "completion": "Quote the governing terms, explain their hosting implications, and list the questions that require legal review."
+    }
+  },
+  "T7": {
+    "id": "T7",
+    "stage": "technical",
+    "question": "How healthy and mature is the project?",
+    "required_fields": [
+      "activity",
+      "maintainers_and_contributors",
+      "release_cadence",
+      "adoption_signals",
+      "maturity_risks"
+    ],
+    "completion_rule": "Use dated, cited repository metadata and registry evidence; separate attention (stars) from use (downloads, dependents, production users).",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "project-health",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Judge whether the project is a stable foundation for a business and how dependent it is on a few maintainers.",
+      "evidence_needed": "Repository metadata (commits, contributors, releases, issues), package registry downloads and dependents, documented production users, and governance or funding information.",
+      "search_routes": [
+        "Start from the saved GitHub metadata source; read release history and contributor concentration.",
+        "Search registries and public adopter lists for dependents and production use."
+      ],
+      "weak_signals": "Stars, forks and social mentions measure attention, not adoption; a quiet repository can be mature rather than abandoned.",
+      "completion": "Report dated activity, maintainer concentration, release cadence and adoption evidence, naming the maturity risks."
+    }
+  },
+  "T8": {
+    "id": "T8",
+    "stage": "technical",
+    "question": "Where could it be applied?",
+    "required_fields": [
+      "applications",
+      "target_workloads",
+      "adjacent_uses",
+      "unsuitable_uses"
+    ],
+    "completion_rule": "Ground each proposed application in a cited capability; label proposed uses as hypotheses until customer evidence supports them.",
+    "allow_unavailable": false,
+    "allowed_bases": [
+      "source_observed",
+      "vendor_reported",
+      "modelled"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "application-discovery",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Generate the candidate uses and workloads a hosted product could serve, from what the technology demonstrably does.",
+      "evidence_needed": "Implemented capabilities from the Technical findings, documented use cases, examples and demos, adopters' descriptions of their use, and limits that rule uses out.",
+      "search_routes": [
+        "Map implemented capabilities and integrations to workloads; read examples and adopter accounts.",
+        "Search for how existing users apply the technology and where they hit its limits."
+      ],
+      "weak_signals": "Vendor use-case pages and a founder's ideas are hypotheses, not demand.",
+      "completion": "List applications and workloads tied to cited capabilities, plus uses the evidence shows it is unsuitable for."
+    }
+  },
+  "T9": {
+    "id": "T9",
+    "stage": "technical",
+    "question": "What would a hosted open-core product include?",
+    "required_fields": [
+      "managed_service_scope",
+      "open_core_boundary",
+      "multi_tenancy_gaps",
+      "build_effort",
+      "differentiation_from_self_hosting"
+    ],
+    "completion_rule": "Derive the proposal from accepted T1–T8 findings and cite them; keep it a proposal with explicit assumptions and unknowns.",
+    "allow_unavailable": true,
+    "allowed_bases": [
+      "source_observed",
+      "modelled"
+    ],
+    "guide_version": "open-core-technical-v1",
+    "skills": [
+      "managed-offering-design",
+      "repository-index",
+      "code-exploration"
+    ],
+    "research_guide": {
+      "decision": "Propose the managed service and open-core boundary that the technical evidence supports, as input to Market and Business work.",
+      "evidence_needed": "Accepted T1–T8 findings: architecture, deployment, dependencies, integrations, operating burdens, license terms, project health and applications; existing hosted offerings for the same technology.",
+      "search_routes": [
+        "Reread the accepted Technical findings and their citations before proposing anything.",
+        "Search for existing managed or hosted offerings of the same technology, including the maintainers' own."
+      ],
+      "weak_signals": "A feature list without a cited operating burden or buyer need is not a product boundary.",
+      "completion": "Describe the managed scope, what stays open source, missing multi-tenant and control-plane work, a modelled build effort with assumptions, and why a customer would pay instead of self-hosting."
+    }
+  },
   "M1": {
     "id": "M1",
     "stage": "market",
@@ -28,7 +335,10 @@
       ],
       "weak_signals": "Vendor targeting and a founder's persona describe intended customers, not demonstrated buyers.",
       "completion": "Identify the roles and trigger with attribution; label unverified roles as customer hypotheses and name the missing observation."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "M2": {
     "id": "M2",
@@ -58,7 +368,10 @@
       ],
       "weak_signals": "A template or how-to article explains a workflow, not pain frequency. Vendor anecdotes and self-selected complaints cannot establish prevalence or measured losses.",
       "completion": "Attribute qualitative pain to the people or sources observed. Quantify only what the evidence measures; mark frequency, severity or losses unresolved when not established."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "M3": {
     "id": "M3",
@@ -89,7 +402,10 @@
       ],
       "weak_signals": "Posts, likes, searches, waitlists and repeated articles indicate attention. Vendor customer counts remain attributed claims; purchases of alternatives do not prove demand for our offering.",
       "completion": "Name the strongest supported signal and its scope. Report attention as attention and missing purchasing evidence as unresolved; do not turn a bounded unsuccessful search into proof of no demand."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "M4": {
     "id": "M4",
@@ -118,7 +434,10 @@
       ],
       "weak_signals": "A generic competitor list or a popular adjacent product does not establish relevance. Advertised positioning does not establish superiority.",
       "completion": "Justify up to three relevant competitors and exclusions, or explain why none qualifies. Preserve sources, known versions and unresolved comparison values."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "M5": {
     "id": "M5",
@@ -147,7 +466,10 @@
       ],
       "weak_signals": "Feature requests and complaints do not demonstrate willingness to switch or pay. Vendor comparisons may omit strengths and switching costs.",
       "completion": "Attribute reasons to switch and stay to the relevant task, and separate observed migrations from proposed differentiation."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "M6": {
     "id": "M6",
@@ -178,7 +500,10 @@
       ],
       "weak_signals": "An advertised price is not an actual purchase. Competitor spending, stated willingness and free signups do not establish willingness to pay for our product.",
       "completion": "Report each supported price or spending category separately. Label our price as a hypothesis unless directly supported, and identify the customer test needed for missing purchasing evidence."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "M7": {
     "id": "M7",
@@ -208,7 +533,10 @@
       ],
       "weak_signals": "A broad market headline or arbitrary capture percentage does not establish reachable demand. Counts from different periods or definitions are not interchangeable.",
       "completion": "Provide reproducible low/base/high ranges with units and assumptions, or identify unavailable required inputs without inventing a precise market value."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "M8": {
     "id": "M8",
@@ -238,7 +566,10 @@
       ],
       "weak_signals": "Audience size, ad availability and a vendor's sales funnel do not establish customer acquisition or a measured sales cycle.",
       "completion": "Describe a sourced buying path or an explicit channel hypothesis, with the missing observation needed to test it."
-    }
+    },
+    "skills": [
+      "market-evidence"
+    ]
   },
   "B1": {
     "id": "B1",
@@ -269,7 +600,10 @@
       ],
       "weak_signals": "A feature list, competitor popularity or agent preference does not validate the proposed offering.",
       "completion": "Describe a bounded offering and intended outcome as a proposal, retaining the customer assumptions and required gaps that limit it."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B2": {
     "id": "B2",
@@ -299,7 +633,10 @@
       ],
       "weak_signals": "An existing open-core business does not prove our packaging will sell or that a license is suitable.",
       "completion": "Explain a provisional free/paid boundary and billing unit, with unresolved purchasing and license assumptions explicit."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B3": {
     "id": "B3",
@@ -330,7 +667,10 @@
       ],
       "weak_signals": "A subscription price minus model costs alone does not establish profitability. Unknown support or acquisition costs cannot become zero.",
       "completion": "Calculate reproducible low/base/high scenarios and sensitivity with explicit units; block a profitability conclusion when required inputs remain unavailable."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B4": {
     "id": "B4",
@@ -361,7 +701,10 @@
       ],
       "weak_signals": "A large community or another company's conversion rate does not establish our acquisition cost.",
       "completion": "Propose a cohort, channel, offer and observable result; keep conversion assumptions provisional and do not contact anyone."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B5": {
     "id": "B5",
@@ -391,7 +734,10 @@
       ],
       "weak_signals": "Signups, satisfaction statements and initial purchases do not establish retained paying customers.",
       "completion": "State a retention hypothesis and an observation period, separating measured retention from reasons the offering might be used again."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B6": {
     "id": "B6",
@@ -422,7 +768,10 @@
       ],
       "weak_signals": "A quick prototype or framework example does not establish delivery time, operational reliability or total effort.",
       "completion": "Match a bounded delivery proposal to resources and dependencies; label time and effort estimates and preserve unavailable Technical inputs."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B7": {
     "id": "B7",
@@ -452,7 +801,10 @@
       ],
       "weak_signals": "Code inspection cannot establish measured speed, cost or commercial superiority. Feature differences alone do not establish a durable advantage.",
       "completion": "Separate supported differences from advantage hypotheses and unknown comparisons; do not produce unsupported rankings or scores."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B8": {
     "id": "B8",
@@ -481,7 +833,10 @@
       ],
       "weak_signals": "Generic risk lists and speculative concerns do not establish a blocker; a material hard constraint cannot be averaged into a score.",
       "completion": "Explain the affected decision and evidence or input needed, distinguishing an established constraint from an unresolved risk."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   },
   "B9": {
     "id": "B9",
@@ -514,6 +869,9 @@
       ],
       "weak_signals": "More sources or higher agent confidence do not define an experiment's success. A recommendation is not permission to execute it.",
       "completion": "Propose a method with observable success, failure and inconclusive conditions and finite time/spend; preserve human review and do not execute the test."
-    }
+    },
+    "skills": [
+      "business-strategy"
+    ]
   }
 }

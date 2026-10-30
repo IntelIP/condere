@@ -5,7 +5,7 @@ import secrets
 from pathlib import Path
 from uuid import uuid4
 
-from configure_langfuse import doppler
+from doppler_config import doppler
 
 from condere.interfaces.server import verified_image
 

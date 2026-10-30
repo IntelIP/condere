@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 MCP_NAMES = ("CONDERE_API_URL", "CONDERE_API_TOKEN", "CONDERE_EXPORT_DIRECTORY")
@@ -20,11 +21,20 @@ API_NAMES = (
     "CONDERE_EVIDENCE_BUCKET",
     "CONDERE_SMOL_IMAGE",
     "CONDERE_ARTIFACT_DIRECTORY",
-    "CONDERE_OPENROUTER_API_KEY",
     "EXA_API_KEY",
-    "LANGFUSE_PUBLIC_KEY",
-    "LANGFUSE_SECRET_KEY",
-    "LANGFUSE_BASE_URL",
+    "LANGSMITH_API_KEY",
+)
+# Optional LangSmith destination and endpoint; the server validates the combination.
+API_OPTIONAL = (
+    "CONDERE_MODEL_PROVIDER",
+    "CONDERE_CHATGPT_HOME",
+    "CONDERE_OPENROUTER_API_KEY",
+    "LANGSMITH_PROJECT",
+    "LANGSMITH_AGENT_ID",
+    "LANGSMITH_AGENT_ENVIRONMENT",
+    "LANGSMITH_ENDPOINT",
+    "LANGSMITH_WORKSPACE_ID",
+    "LANGSMITH_DATASET",
 )
 
 
@@ -39,12 +49,28 @@ def child_environment(component: str, values: dict, inherited: dict) -> dict:
         if name in inherited
     }
     result.update({name: values[name] for name in names})
+    if component == "api":
+        result.update({name: values[name] for name in API_OPTIONAL if values.get(name)})
     result.update({"LANGSMITH_TRACING": "false", "LANGCHAIN_TRACING_V2": "false"})
+    if component == "api":
+        result["LANGSMITH_REVISION_ID"] = revision()
     return result
 
 
+def revision() -> str:
+    """Code version for traces, so trace analysis can tie behavior to the code that ran."""
+    root = Path(__file__).resolve().parents[1]
+    commit = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout.strip()
+    return (commit or "unknown") + ("-dirty" if dirty else "")
+
+
 def main() -> None:
-    from configure_langfuse import doppler
+    from doppler_config import doppler
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("component", choices=("api", "mcp"))

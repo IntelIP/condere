@@ -4,7 +4,7 @@ Condere helps a founder evaluate a technology as a possible software business,
 then gives a person or coding agent a cited assessment and development handoff.
 
 This branch starts a clean implementation using open-source **Deep Agents**,
-self-hosted **Langfuse**, and self-hosted **SmolVM**. `MDA` is the branch's project
+self-hosted **SmolVM**, and **LangSmith** tracing and datasets. `MDA` is the branch's project
 label; this is not LangChain's hosted Managed Deep Agents service.
 
 ## Start here
@@ -16,7 +16,7 @@ label; this is not LangChain's hosted Managed Deep Agents service.
 - [Backlog](backlog.md): bounded user outcomes, dependencies, and acceptance criteria.
 - [Roadmap](roadmap.md): delivery sequence and launch milestones.
 - [Demo](demo.md): the complete user journey and the observations needed to accept it.
-- [Infrastructure](infra/README.md): Langfuse configuration and SmolVM startup plan.
+- [Infrastructure](infra/README.md): LangSmith tracing configuration and SmolVM startup plan.
 
 ## Current state
 
@@ -35,9 +35,9 @@ restart check retained saved source identities and a complete dossier. Research
 models remain deterministic fixtures, so these results establish integration
 behavior rather than business conclusions.
 
-The complete fictional assessment now uses all selected infrastructure, including
-correlated Langfuse traces. It also completes with Langfuse stopped and reports
-missing telemetry through the API/MCP status. Live research and retrieval inside
+The complete fictional assessment uses SmolVM, PostgreSQL, and object storage.
+Each worker emits one LangSmith root trace; the assessment completes when tracing is
+unreachable and reports missing telemetry through the API/MCP status. Live research and retrieval inside
 both coding clients remain unfinished. See the
 [installation guide](infra/README.md#api-and-coding-client-installation) and
 [handoff](roadmap.md#current-handoff) for working commands and prerequisites.

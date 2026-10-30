@@ -9,10 +9,8 @@ import pytest
 from botocore.exceptions import ClientError
 
 from condere.runtime.contracts import (
-    CAPABILITY_CATEGORIES,
     QUESTION_IDS,
     QUESTIONS,
-    TECHNICAL_FIELDS,
     AssessmentFindings,
     Citation,
 )
@@ -135,48 +133,27 @@ def test_failed_object_write_does_not_publish_a_source_record(evidence_case):
     assert evidence.text(owner, case, source.id).startswith("  Fixture")
 
 
-def full_fixture(metric):
-    unknown = dict(
-        conclusion="Not established in this fixture.",
-        availability="unavailable",
-        limitations=["Simulated evidence only."],
-    )
-    questions = [
-        dict(
+def full_fixture(measured: dict):
+    """All 26 answers; T5 carries the measured claim under test."""
+
+    def answer(key):
+        missing = key == "B3" or "modelled" not in QUESTIONS[key]["allowed_bases"]
+        return dict(
             question_id=key,
             conclusion="Fictional hypothesis.",
-            availability="unavailable" if key == "B3" else "available",
-            basis=None if key == "B3" else "modelled",
-            assumptions=[] if key == "B3" else ["Simulation, not business evidence."],
+            availability="unavailable" if missing else "available",
+            basis=None if missing else "modelled",
+            assumptions=[] if missing else ["Simulation, not business evidence."],
             limitations=["No live research."],
             details={
-                field: None if key == "B3" else "Fictional proposed detail."
+                field: None if missing else "Fictional proposed detail."
                 for field in QUESTIONS[key]["required_fields"]
             },
             next_action="Human review only.",
         )
-        for key in QUESTION_IDS
-    ]
+
     return AssessmentFindings.model_validate(
-        dict(
-            technical=dict(
-                findings={field: unknown for field in TECHNICAL_FIELDS},
-                capabilities=[
-                    dict(
-                        scenario="fixture",
-                        category=category,
-                        name=category,
-                        status="unavailable",
-                        value=None,
-                        finding=unknown,
-                    )
-                    for category in CAPABILITY_CATEGORIES
-                ],
-                inspection_limitations=["No repository inspection in this simulation."],
-                metrics=[metric],
-            ),
-            questions=questions,
-        )
+        dict(questions=[answer(key) | (measured if key == "T5" else {}) for key in QUESTION_IDS])
     )
 
 
@@ -194,33 +171,12 @@ def test_measurements_require_an_immutable_receipt_bound_to_the_saved_source(evi
         limitations=["Simulated measurement, not a benchmark."],
     )
     citation = evidence.passage(owner, case, source.id)["citation"]
-    metric = dict(
-        scenario="fixture",
-        subject="example",
-        name="p95_latency",
-        value="1.2",
-        unit="second",
-        basis="measured",
-        source_ids=[source.id],
-        citations=[citation],
-        receipt_id="fixture-receipt",
-        product_version="fixture-1",
-        conditions=dict(
-            workload="simulated",
-            fixture_id="fixture-1",
-            measurement_protocol_id="fixture-protocol",
-            baseline_id="fixture-baseline",
-            region="local-fixture",
-        ),
+    findings = full_fixture(
+        dict(basis="measured", assumptions=[], source_ids=[source.id], citations=[citation])
     )
-    findings = full_fixture(metric)
     with pytest.raises(EvidenceError, match="source-bound receipt"):
         evidence.verify_findings(owner, case, findings)
-    measured = findings.technical.metrics[0].model_dump(
-        mode="json",
-        include={"scenario", "subject", "name", "value", "unit", "product_version", "conditions"},
-    )
-    receipt = dict(source_id=source.id, original_sha256=source.original_sha256, metric=measured)
+    receipt = dict(source_id=source.id, original_sha256=source.original_sha256)
     accepted = evidence.state.append_record(
         owner, case, "measurement_receipt", "fixture-receipt", receipt
     )
@@ -231,13 +187,34 @@ def test_measurements_require_an_immutable_receipt_bound_to_the_saved_source(evi
             case,
             "measurement_receipt",
             "fixture-receipt",
-            receipt | {"metric": measured | {"value": "0.1"}},
+            receipt | {"original_sha256": "0" * 64},
             supersedes_hash=accepted["content_hash"],
         )
-    with pytest.raises(EvidenceError, match="matching protected"):
-        evidence.verify_findings(owner, case, full_fixture(metric | {"value": "0.1"}))
     evidence.client.objects[(evidence.bucket, evidence._key(case, source.original_sha256))] = (
         b"Changed after acceptance"
     )
     with pytest.raises(EvidenceError, match="content hash"):
         evidence.verify_findings(owner, case, findings)
+
+
+def test_citations_resolve_from_source_and_exact_quote(evidence_case):
+    evidence, owner, case = evidence_case
+    source = save(evidence, owner, case)
+    payload = {
+        "conclusion": "x",
+        "nested": [{"citations": [{"source_id": source.id, "quote": "Second passage."}]}],
+        "citations": [{"source_id": source.id, "quote": "Fixture source,\n not  market evidence."}],
+    }
+    resolved = evidence.resolve_citations(owner, case, payload)
+    exact = Citation.model_validate(resolved["citations"][0])
+    assert exact.quote == "Fixture source, not market evidence."
+    assert exact.text_sha256 == source.text_sha256 and exact.start == 2
+    evidence.verify_citation(owner, case, exact)
+    nested = Citation.model_validate(resolved["nested"][0]["citations"][0])
+    evidence.verify_citation(owner, case, nested)
+    with pytest.raises(EvidenceError, match="not found"):
+        evidence.resolve_citations(
+            owner, case, {"citations": [{"source_id": source.id, "quote": "Invented demand."}]}
+        )
+    with pytest.raises(EvidenceError, match="cited passage"):
+        evidence.verify_citation(owner, case, Citation(source_id=source.id, quote="Fixture"))
