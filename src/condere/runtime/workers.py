@@ -6,9 +6,9 @@ from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
 
-from condere.runtime.agent import build_agent
+from condere.runtime.agent import build_agent, build_lead_agent
 from condere.runtime.chatgpt_plan import PlanChatOpenAI
-from condere.runtime.providers import AccountedChatOpenAI, ExaResearch
+from condere.runtime.providers import AccountedChatOpenAI, ApifyResearch, ExaResearch
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService, output_keys
 from condere.runtime.state import Conflict
@@ -30,6 +30,9 @@ async def run_worker(
     allowed_repositories: set[str],
     question_id: str | None = None,
     callbacks: list | None = None,
+    social: ApifyResearch | None = None,
+    code_model: BaseChatModel | None = None,
+    extract_model: BaseChatModel | None = None,
 ) -> dict:
     """Complete one assignment; the coordinator owns scheduling, cancellation, and VM lifecycle."""
     if checkpointer is None:
@@ -47,6 +50,19 @@ async def run_worker(
             raise Conflict("The model must use the assigned worker's spending ledger.")
         if role != "review" and research is None:
             raise ValueError("A live research worker requires its accounted research adapter.")
+        if role == "lead":
+            for subagent in (code_model, extract_model):
+                if not isinstance(subagent, (AccountedChatOpenAI, PlanChatOpenAI)):
+                    raise ValueError("Live subagents require accounted model adapters.")
+                ledger = subagent._context
+                if ledger.state is not service.state or (
+                    ledger.owner,
+                    ledger.assessment_id,
+                    ledger.generation,
+                ) != (owner, assessment_id, generation):
+                    raise Conflict("Subagent models must use this assessment's spending ledger.")
+    if role == "lead" and (code_model is None or extract_model is None):
+        raise ValueError("The lead requires code-analyst and extractor models.")
     assigned = await asyncio.to_thread(
         service.assign_worker,
         owner,
@@ -72,6 +88,7 @@ async def run_worker(
             sandbox=sandbox,
             repository_cache=repository_cache,
             allowed_repositories=allowed_repositories,
+            social=social,
         )
         assignment = json.dumps(assigned["assignment"], sort_keys=True) + (
             "\nStart with read_assessment for the preserved brief, accepted findings, and exact "
@@ -115,15 +132,36 @@ async def run_worker(
                 "retrievable facts to the user. Do not manufacture missing commercial facts. "
                 "You may build /workspace/screen.json and pass its path to submit_screen."
             )
-        agent = await asyncio.to_thread(
-            build_agent,
-            model,
-            sandbox,
-            assignment=assignment,
-            skills=assigned["assignment"]["skills"],
-            tools=tools,
-            checkpointer=checkpointer,
-        )
+        if role == "lead":
+            assignment = json.dumps(assigned["assignment"], sort_keys=True) + (
+                "\nStart with read_assessment for the brief and the exact Analysis schema. "
+                "You may use the sandbox tools (execute, ls, read_file, grep, glob) inside "
+                "/workspace, and the saved repository index under repository_indexes. Submit "
+                "the analysis with submit_analysis; a final message alone does not complete "
+                "this assignment. Repeated rejected submissions stop the work, so read each "
+                "error and fix its cause. Do not request internal-stage human approval."
+            )
+            agent = await asyncio.to_thread(
+                build_lead_agent,
+                model,
+                sandbox,
+                assignment=assignment,
+                skills=assigned["assignment"]["skills"],
+                tools=tools,
+                code_model=code_model,
+                extract_model=extract_model,
+                checkpointer=checkpointer,
+            )
+        else:
+            agent = await asyncio.to_thread(
+                build_agent,
+                model,
+                sandbox,
+                assignment=assignment,
+                skills=assigned["assignment"]["skills"],
+                tools=tools,
+                checkpointer=checkpointer,
+            )
         config = {
             "configurable": {"thread_id": assigned["thread_id"]},
             "metadata": {
@@ -146,8 +184,9 @@ async def run_worker(
                         {"role": "user", "content": "Complete your trusted Condere assignment."}
                     ],
                     # One question per worker: load its methods up front instead of hoping
-                    # the model opens them (Deep Agents skill pinning).
-                    "pinned_skills": assigned["assignment"]["skills"],
+                    # the model opens them (Deep Agents skill pinning). The lead's prompt names
+                    # the skill for each stage, so it loads them on demand instead.
+                    "pinned_skills": [] if role == "lead" else assigned["assignment"]["skills"],
                 },
                 config=config,
             )

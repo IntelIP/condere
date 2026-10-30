@@ -1,6 +1,6 @@
 ---
 name: rights-and-ownership
-description: Decide whether the IP can be spun off: who owns it, what licenses govern it, and whether it can be open-sourced or sold as a hosted service.
+description: "Decide whether the IP can be spun off: who owns it, what licenses govern it, and whether it can be open-sourced or sold as a hosted service."
 ---
 
 # Rights and ownership

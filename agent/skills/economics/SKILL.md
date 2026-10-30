@@ -1,6 +1,6 @@
 ---
 name: economics
-description: Estimate whether the chosen option could be profitable and buildable with the founder's resources, using the calculation tool.
+description: "Estimate whether the chosen option could be profitable and buildable with the founder's resources, using the calculation tool."
 ---
 
 # Economics and feasibility

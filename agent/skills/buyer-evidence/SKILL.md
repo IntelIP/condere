@@ -1,6 +1,6 @@
 ---
 name: buyer-evidence
-description: Find who has the problem, who pays, how painful it is, what they use today, why they would switch or stay, what they spend, and how they buy.
+description: "Find who has the problem, who pays, how painful it is, what they use today, why they would switch or stay, what they spend, and how they buy."
 ---
 
 # Buyer evidence

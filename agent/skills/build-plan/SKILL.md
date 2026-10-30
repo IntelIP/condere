@@ -1,6 +1,6 @@
 ---
 name: build-plan
-description: After the decision, turn the chosen option into a build plan a coding agent can execute, tied to real code paths.
+description: "After the decision, turn the chosen option into a build plan a coding agent can execute, tied to real code paths."
 ---
 
 # Build plan

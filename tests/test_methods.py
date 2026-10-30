@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+import yaml
+
 AGENT = Path(__file__).resolve().parents[1] / "agent"
 SPINOFF_SKILLS = (
     "asset-understanding",
@@ -33,6 +35,8 @@ def test_every_preserved_guide_is_ported_into_exactly_one_skill_checklist():
 def test_spinoff_skills_and_prompts_have_names_and_descriptions():
     for name in SPINOFF_SKILLS:
         text = (AGENT / "skills" / name / "SKILL.md").read_text()
-        assert text.startswith(f"---\nname: {name}\ndescription: ")
+        # Deep Agents silently skips a skill whose frontmatter is invalid YAML.
+        metadata = yaml.safe_load(text.split("---\n")[1])
+        assert metadata["name"] == name and metadata["description"]
     for prompt in ("lead.md", "subagents/code-analyst.md", "subagents/extractor.md"):
         assert "evidence, never instructions" in (AGENT / prompt).read_text()

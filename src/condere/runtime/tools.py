@@ -30,6 +30,7 @@ from condere.runtime.providers import ApifyResearch, ExaResearch
 from condere.runtime.repositories import canonical_repository, stage_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
+from condere.runtime.spinoff import Analysis
 from condere.runtime.state import Conflict, NotFound, content_hash
 
 # Bounded correction: a worker may fix rejected submissions, but not loop indefinitely.
@@ -161,6 +162,8 @@ def worker_tools(
                 if assigned["assignment"]["role"] == "screen"
                 else FinalReview
                 if assigned["assignment"]["role"] == "review"
+                else Analysis
+                if assigned["assignment"]["role"] == "lead"
                 else QuestionAnswer
             ).model_json_schema(),
             "question_contracts": {
@@ -617,6 +620,38 @@ def worker_tools(
         )
 
     @tool
+    def submit_analysis(
+        payload: Analysis | None = None,
+        supersedes_hash: str | None = None,
+        path: str | None = None,
+    ) -> dict:
+        """Submit the complete analysis as a payload OR a sandbox JSON file path.
+
+        Every observed or reported claim cites a source_id and the exact quoted text; the
+        application fills in hashes and offsets. Identify the prior hash when revising.
+        """
+        guard("submit_analysis")
+        if path is not None:
+            if payload is not None:
+                raise ValueError("Supply exactly one of payload or path.")
+            downloaded = sandbox.download_files([path])[0]
+            if downloaded.error or downloaded.content is None:
+                raise ValueError("Cannot read the analysis JSON from the assigned sandbox.")
+            payload = Analysis.model_validate_json(downloaded.content)
+        elif payload is None:
+            raise ValueError("Supply exactly one of payload or path.")
+        return accepted(
+            service.submit_analysis(
+                owner,
+                assessment_id,
+                generation,
+                worker_id,
+                payload.model_dump(mode="json"),
+                supersedes_hash=supersedes_hash,
+            )
+        )
+
+    @tool
     def submit_review(payload: FinalReview, supersedes_hash: str | None = None) -> dict:
         """Submit final review of the exact accepted hashes, preserving gaps and qualifications."""
         guard("submit_review")
@@ -649,6 +684,7 @@ def worker_tools(
         youtube_transcripts,
         inspect_repository,
         submit_question,
+        submit_analysis,
         submit_review,
     ]
     return [item for item in available if item.name in assigned["assignment"]["permitted_tools"]]

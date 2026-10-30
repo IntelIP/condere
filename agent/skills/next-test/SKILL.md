@@ -1,6 +1,6 @@
 ---
 name: next-test
-description: Choose the next bounded test that could change the decision, the constraints that could make the opportunity unsuitable, and how the first customers might be reached.
+description: "Choose the next bounded test that could change the decision, the constraints that could make the opportunity unsuitable, and how the first customers might be reached."
 ---
 
 # Next test

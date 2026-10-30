@@ -1,6 +1,6 @@
 ---
 name: open-core-boundary
-description: Propose two to four spin-off options and, for each, where the line between the open and the paid part falls and why a buyer would pay.
+description: "Propose two to four spin-off options and, for each, where the line between the open and the paid part falls and why a buyer would pay."
 ---
 
 # Open-core boundary and options

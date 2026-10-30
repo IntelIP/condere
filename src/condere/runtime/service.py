@@ -26,6 +26,7 @@ from condere.runtime.dossier import (
 )
 from condere.runtime.evidence import EvidenceError, EvidenceStore, SourceDocument
 from condere.runtime.reporting import render_figures, render_html
+from condere.runtime.spinoff import Analysis
 from condere.runtime.state import AssessmentStore, Conflict, NotFound, content_hash
 
 POLICY_VERSION = "condere-mda-v3"
@@ -82,11 +83,24 @@ RESEARCH_TOOLS = {
     ],
     "review": [],
 }
-SUBMIT_TOOL = {"screen": "submit_screen", "review": "submit_review"}
+RESEARCH_TOOLS["lead"] = list(RESEARCH_TOOLS["technical"])
+SUBMIT_TOOL = {"screen": "submit_screen", "review": "submit_review", "lead": "submit_analysis"}
 SHARED_SKILLS = ["opportunity-framing"]
 ROLE_SKILLS = {
     "screen": ["repository-index", "code-exploration"],
     "review": ["evidence-reconciliation", "dossier-and-handoff", "visual-reporting"],
+    "lead": [
+        "asset-understanding",
+        "rights-and-ownership",
+        "open-core-boundary",
+        "buyer-evidence",
+        "economics",
+        "next-test",
+        "search-routing",
+        "repository-index",
+        "code-exploration",
+        "evidence-reconciliation",
+    ],
 }
 
 
@@ -96,6 +110,8 @@ def output_keys(assignment: dict) -> list[str]:
         return ["screen:main"]
     if assignment["role"] == "review":
         return ["review:final"]
+    if assignment["role"] == "lead":
+        return ["analysis:main"]
     return ["question:" + identity for identity in assignment["question_ids"]]
 
 
@@ -195,7 +211,7 @@ class AssessmentService:
     ) -> dict:
         """One worker per question (or the screen/review); its skills and tools are narrow."""
         self._compatible(self.state.get(owner, assessment_id))
-        if role not in {"screen", "review", *STAGES}:
+        if role not in {"screen", "review", "lead", *STAGES}:
             raise ValueError("Unknown private worker role.")
         if (role in STAGES) != (question_id is not None) or (
             question_id is not None and question_id not in STAGES[role]
@@ -204,8 +220,11 @@ class AssessmentService:
         question_ids = (
             list(QUESTION_IDS) if role == "review" else [question_id] if question_id else []
         )
-        skills = SHARED_SKILLS + (
-            QUESTIONS[question_id]["skills"] if question_id else ROLE_SKILLS[role]
+        skills = (
+            ROLE_SKILLS["lead"]
+            if role == "lead"
+            else SHARED_SKILLS
+            + (QUESTIONS[question_id]["skills"] if question_id else ROLE_SKILLS[role])
         )
         key = f"{role}:{question_id}" if question_id else role
         assignment = dict(
@@ -270,6 +289,34 @@ class AssessmentService:
             generation=generation,
             worker_id=worker_id,
         )
+
+    def submit_analysis(
+        self, owner, assessment_id, generation, worker_id, payload, *, supersedes_hash=None
+    ) -> dict:
+        """Accept the lead's analysis once every quote matches its saved source."""
+        self._worker(owner, assessment_id, generation, worker_id, "lead")
+        analysis = Analysis.model_validate(
+            self.evidence.resolve_citations(owner, assessment_id, payload)
+        )
+        for claim in analysis.claims:
+            for citation in claim.citations:
+                self.evidence.verify_citation(owner, assessment_id, citation)
+        return self.state.append_record(
+            owner,
+            assessment_id,
+            "analysis",
+            "main",
+            analysis.model_dump(mode="json"),
+            supersedes_hash=supersedes_hash,
+            generation=generation,
+            worker_id=worker_id,
+        )
+
+    def analysis(self, owner, assessment_id) -> Analysis:
+        records = self._heads(self.state.records(owner, assessment_id, kind="analysis"))
+        if "analysis:main" not in records:
+            raise NotFound("No analysis has been submitted.")
+        return Analysis.model_validate(records["analysis:main"]["payload"])
 
     def screening(self, owner, assessment_id) -> OpportunityScreen:
         records = self._heads(self.state.records(owner, assessment_id, kind="screen"))

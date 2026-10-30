@@ -1,6 +1,6 @@
 ---
 name: search-routing
-description: Choose where and how to search so evidence is current, firsthand and decision-relevant.
+description: "Choose where and how to search so evidence is current, firsthand and decision-relevant."
 ---
 
 # Search routing

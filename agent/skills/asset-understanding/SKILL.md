@@ -1,6 +1,6 @@
 ---
 name: asset-understanding
-description: Understand the digital IP itself: what it does, how it is built and run, what it depends on, what is hard to operate, how healthy it is, and where it applies.
+description: "Understand the digital IP itself: what it does, how it is built and run, what it depends on, what is hard to operate, how healthy it is, and where it applies."
 ---
 
 # Asset understanding

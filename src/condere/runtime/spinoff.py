@@ -467,3 +467,21 @@ class SpinoffResult(Record):
         if self.build_plan is not None and self.build_plan.option != self.decision.option.value:
             raise ValueError("The build plan must target the chosen option.")
         return self
+
+
+class ExtractedClaim(Record):
+    """A subagent's claim; the lead assigns its ID when merging it into the analysis."""
+
+    statement: Text
+    status: ClaimStatus
+    published_at: Text | None = None
+    citations: list[Citation] = Field(default_factory=list)
+    origin_groups: list[Text] = Field(default_factory=list)
+
+
+class ClaimBatch(Record):
+    """Structured output returned by the code-analyst and extractor subagents."""
+
+    claims: list[ExtractedClaim] = Field(default_factory=list)
+    components: list[Component] = Field(default_factory=list)
+    notes: Text | None = None
