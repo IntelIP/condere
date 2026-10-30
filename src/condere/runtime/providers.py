@@ -1042,19 +1042,53 @@ class ApifyResearch:
         params = {"timeout": 150, "memory": 1024, "maxTotalChargeUsd": str(bound)}
 
         def invoke():
+            # Start the run, wait for it to finish, then read its items and actual usage, so
+            # the ledger settles the real charge instead of holding the cap as pending.
+            response = self.client.post(
+                f"/acts/{actor.name}/runs", params=params | {"waitForFinish": 60}, json=body
+            )
+            response.raise_for_status()
+            run = response.json()["data"]
+            for _ in range(3):
+                if run["status"] not in {"READY", "RUNNING"}:
+                    break
+                waited = self.client.get(f"/actor-runs/{run['id']}", params={"waitForFinish": 60})
+                waited.raise_for_status()
+                run = waited.json()["data"]
+            if run["status"] != "SUCCEEDED":
+                raise ValueError(f"The Apify run ended {run['status']}.")
             with self.client.stream(
-                "POST", f"/acts/{actor.name}/run-sync-get-dataset-items", params=params, json=body
-            ) as response:
-                response.raise_for_status()
+                "GET",
+                f"/datasets/{run['defaultDatasetId']}/items",
+                params={"clean": "true", "format": "json"},
+            ) as items:
+                items.raise_for_status()
                 raw = bytearray()
-                for chunk in response.iter_bytes():
+                for chunk in items.iter_bytes():
                     raw.extend(chunk)
                     if len(raw) > MAX_RESPONSE_BYTES:
                         raise ValueError("The provider response exceeded its admitted size.")
             data = json.loads(raw)
             if not isinstance(data, list):
                 raise ValueError("The Actor did not return a dataset item list.")
-            return ProviderResult({"items": data, "retrieved_at": datetime.now(UTC).isoformat()})
+            usage = run.get("usageTotalUsd")
+            return ProviderResult(
+                {
+                    "items": data,
+                    "retrieved_at": datetime.now(UTC).isoformat(),
+                    "apify_run_id": run["id"],
+                },
+                actual_microusd=microusd(usage) if usage is not None else None,
+                cost_basis=(
+                    {
+                        "basis": "Apify run usageTotalUsd at completion",
+                        "apify_run_id": run["id"],
+                        "reported_usd": str(usage),
+                    }
+                    if usage is not None
+                    else None
+                ),
+            )
 
         with _APIFY_SLOTS:
             operation = self._dispatch(
@@ -1086,18 +1120,19 @@ class ApifyResearch:
         if operation["state"] != "succeeded":
             raise Conflict("The saved research operation failed; it will not be purchased again.")
         saved = operation["result"]
-        context.state.record_pending_cost(
-            context.owner,
-            context.assessment_id,
-            operation["id"],
-            microusd(bound),
-            {
-                "basis": "Apify pay-per-event bound, enforced upstream by maxTotalChargeUsd; "
-                "the run's actual charge is reconciled from Apify usage",
-                "actor": actor.name,
-                "pricing_source": f"https://apify.com/{actor.name.replace('~', '/')}/pricing",
-            },
-        )
+        if operation["actual_microusd"] is None:
+            context.state.record_pending_cost(
+                context.owner,
+                context.assessment_id,
+                operation["id"],
+                microusd(bound),
+                {
+                    "basis": "Apify pay-per-event bound, enforced upstream by maxTotalChargeUsd; "
+                    "the run's actual charge is reconciled from Apify usage",
+                    "actor": actor.name,
+                    "pricing_source": f"https://apify.com/{actor.name.replace('~', '/')}/pricing",
+                },
+            )
         results, rejected = [], []
         for index, item in enumerate(saved["items"]):
             parsed = PARSERS[platform](item) if isinstance(item, dict) else {}
@@ -1158,6 +1193,7 @@ class ApifyResearch:
             "results": results,
             "rejected_results": rejected,
             "provider_notices": notices,
-            "cost_status": "pending",
+            "cost_status": "pending" if operation["actual_microusd"] is None else "settled",
             "reserved_microusd": microusd(bound),
+            "actual_microusd": operation["actual_microusd"],
         }

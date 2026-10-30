@@ -605,8 +605,17 @@ def test_apify_runs_are_capped_upstream_and_saved_with_origin_groups(provider_ca
     def respond(request):
         requests.append(request)
         assert request.headers["authorization"] == "Bearer fake-apify-token"
+        if request.url.path.startswith("/v2/datasets/"):
+            owner = request.url.path.split("/")[3].removeprefix("dataset-")
+            return httpx.Response(200, json=replies[owner])
         owner = request.url.path.split("/acts/")[1].split("~")[0]
-        return httpx.Response(201, json=replies[owner])
+        run = {
+            "id": "run-" + owner,
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "dataset-" + owner,
+            "usageTotalUsd": 0.0021,
+        }
+        return httpx.Response(201, json={"data": run})
 
     apify = ApifyResearch(
         context, evidence, "fake-apify-token", transport=httpx.MockTransport(respond)
@@ -628,10 +637,14 @@ def test_apify_runs_are_capped_upstream_and_saved_with_origin_groups(provider_ca
     finally:
         apify.close()
     assert [request.url.path for request in requests] == [
-        "/v2/acts/xquik~x-tweet-scraper/run-sync-get-dataset-items",
-        "/v2/acts/harshmaur~reddit-scraper/run-sync-get-dataset-items",
-        "/v2/acts/johnvc~YoutubeTranscripts/run-sync-get-dataset-items",
+        "/v2/acts/xquik~x-tweet-scraper/runs",
+        "/v2/datasets/dataset-xquik/items",
+        "/v2/acts/harshmaur~reddit-scraper/runs",
+        "/v2/datasets/dataset-harshmaur/items",
+        "/v2/acts/johnvc~YoutubeTranscripts/runs",
+        "/v2/datasets/dataset-johnvc/items",
     ]
+    requests = requests[::2]
     assert json.loads(requests[0].content)["tweetIds"] == ["2115777960355708930"]
     # One tweet costs far below the minimum cap that keeps the Actor from returning nothing.
     assert Decimal(requests[0].url.params["maxTotalChargeUsd"]) == Decimal("0.01")
@@ -651,10 +664,11 @@ def test_apify_runs_are_capped_upstream_and_saved_with_origin_groups(provider_ca
     assert any("Upload date" in item for item in video.limitations)
     kinds = [item["kind"] for item in operations(context)]
     assert kinds == ["apify", "apify", "apify"]
-    pending = context.state.spending(context.owner, context.assessment_id)["budget"]
-    assert pending["pending_microusd"] == sum(
-        item["reserved_microusd"] for item in operations(context)
-    )
+    # Each run's actual usage is settled at completion; nothing is left pending.
+    assert [item["actual_microusd"] for item in operations(context)] == [2100, 2100, 2100]
+    assert tweets["cost_status"] == "settled"
+    budget = context.state.spending(context.owner, context.assessment_id)["budget"]
+    assert budget["pending_microusd"] == 0
 
 
 def test_apify_runs_never_exceed_the_plan_concurrency(provider_case):
@@ -668,13 +682,16 @@ def test_apify_runs_never_exceed_the_plan_concurrency(provider_case):
     lock, active, peak = threading.Lock(), [0], [0]
 
     def respond(request):
+        if request.url.path.startswith("/v2/datasets/"):
+            return httpx.Response(200, json=[])
         with lock:
             active[0] += 1
             peak[0] = max(peak[0], active[0])
         time.sleep(0.2)
         with lock:
             active[0] -= 1
-        return httpx.Response(201, json=[])
+        run = {"id": "run", "status": "SUCCEEDED", "defaultDatasetId": "d", "usageTotalUsd": 0}
+        return httpx.Response(201, json={"data": run})
 
     apify = ApifyResearch(
         context, evidence, "fake-apify-token", transport=httpx.MockTransport(respond)
