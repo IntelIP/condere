@@ -229,7 +229,8 @@ async def test_mcp_native_pipeline_and_object_store(native_case, monkeypatch, tm
         assert report == service.report(owner, case["id"]).model_dump(mode="json")
         assert report["schema_version"] == "condere.spinoff.v1"
         sources = await call(session, "list_sources", identity)
-        assert sources["total"] == 1
+        assert sources["total"] == 2  # The fixture page and the saved original request.
+        assert any(item["origin"] == "condere://original-input" for item in sources["sources"])
         source = next(
             item for item in sources["sources"] if item["origin"].endswith("native-fixture")
         )

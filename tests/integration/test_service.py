@@ -9,6 +9,7 @@ import pytest
 from test_evidence import SimulatedObjects
 
 from condere.runtime.bundle import render_readme
+from condere.runtime.contracts import Citation
 from condere.runtime.evidence import EvidenceError, EvidenceStore
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import (
@@ -372,8 +373,6 @@ def completed_code_analysis(service, owner, campaign, commit=COMMIT):
 def test_reuse_copies_verified_code_claims_and_their_sources(reuse_owner):
     from test_coordinator import analysis_payload
 
-    from condere.runtime.contracts import Citation
-
     service, owner_with_campaign = reuse_owner
     owner, campaign = owner_with_campaign()
     completed_code_analysis(service, owner, campaign)
@@ -456,3 +455,19 @@ def test_no_reuse_across_commits_owners_or_code_methods(reuse_owner):
         assert service.state.records(owner_id, case["id"], kind="candidate_claim") == []
         assert service.state.records(owner_id, case["id"], kind="source") == []
         assert service.reused_code_analysis(owner_id, case["id"]) == []
+
+
+def test_the_request_and_any_pasted_text_are_saved_once_as_a_citable_source(setup_case):
+    service, owner, case = setup_case
+    first = service.save_original_input(owner, case["id"])
+    assert service.save_original_input(owner, case["id"]) == first
+    [saved] = [
+        record["payload"]
+        for record in service.state.records(owner, case["id"], kind="source")
+        if record["payload"]["id"] == first
+    ]
+    assert saved["kind"] == "user_file" and saved["origin"] == "condere://original-input"
+    cited = service.evidence._resolve(
+        owner, case["id"], {"source_id": first, "quote": "Assess this fictional technology."}
+    )
+    service.evidence.verify_citation(owner, case["id"], Citation.model_validate(cited))

@@ -80,6 +80,9 @@ class _FixedTimeZip:
         self.archive.writestr(info, data)
 
 
+ORIGINAL_INPUT_ORIGIN = "condere://original-input"
+
+
 class AssessmentService:
     def __init__(
         self,
@@ -535,6 +538,31 @@ class AssessmentService:
                 }
             )
         return sorted(index, key=lambda item: item["id"])
+
+    def save_original_input(self, owner, assessment_id) -> str:
+        """Save the owner's request, including any pasted text, as a citable source.
+
+        A newsletter or email pasted into the request was otherwise not evidence: its facts
+        could not be quoted until the agent found them again online. Saved once per
+        assessment, dated at admission.
+        """
+        for record in self.state.records(owner, assessment_id, kind="source"):
+            if record["payload"]["origin"] == ORIGINAL_INPUT_ORIGIN:
+                return record["payload"]["id"]
+        assessment = self.state.get(owner, assessment_id)
+        text = assessment["brief"]["original_input"]
+        return self.evidence.save_source(
+            owner,
+            assessment_id,
+            kind="user_file",
+            origin=ORIGINAL_INPUT_ORIGIN,
+            original=text.encode("utf-8"),
+            text=text,
+            media_type="text/plain; charset=utf-8",
+            provenance={"provider": "owner", "title": "Original request", "public": False},
+            limitations=["Supplied by the owner in the request; not independently verified."],
+            retrieved_at=assessment["created_at"],
+        ).id
 
     def funnel(self, owner, assessment_id) -> dict:
         """How saved sources narrow to the claims the options rely on, per research route."""

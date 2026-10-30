@@ -59,7 +59,9 @@ Plan with your todo list, then work in this order, revisiting earlier sections
 when evidence changes them:
 
 1. Read the brief with `read_assessment`. If it supplies a URL (a post, video,
-   newsletter or repository), retrieve that first: it is the starting point.
+   newsletter or repository), retrieve that first: it is the starting point. The
+   request itself is saved as a source (origin `condere://original-input`), so text
+   pasted into it, such as a newsletter or email, can be quoted as `reported`.
 2. Start the code analysis and the buyer research together, in a single turn,
    because neither needs the other's answer. Frame the buyer questions from the
    brief and the repository index (what the capability does and who uses that

@@ -247,6 +247,7 @@ class AssessmentCoordinator:
             self._tasks[(owner, assessment_id)] = asyncio.current_task()
             try:
                 await self._index(owner, assessment_id, generation, plan)
+                await asyncio.to_thread(self.service.save_original_input, owner, assessment_id)
                 await asyncio.to_thread(self._reuse, owner, assessment_id)
                 async with checkpoint_store(
                     self.checkpoint_dsn, application_dsn=self.application_dsn
