@@ -43,8 +43,12 @@ when evidence changes them:
    because neither needs the other's answer. Frame the buyer questions from the
    brief and the repository index (what the capability does and who uses that
    kind of software), not from options you have not written yet.
-   - Delegate code reading to `code-analyst` once, with the complete scope in
-     one task (`asset-understanding`, `rights-and-ownership`): components and
+   - If `read_assessment` lists `reused_code_analysis` for the repository, code
+     claims verified for this exact commit by an earlier assessment are already
+     in `candidate_claims` (marked `reused_from`). Use them by candidate ID and
+     delegate to `code-analyst` only for a specific gap they leave.
+   - Otherwise delegate code reading to `code-analyst` once, with the complete
+     scope in one task (`asset-understanding`, `rights-and-ownership`): components and
      paths, build and deployment, dependencies and licenses, operating burden,
      maturity. Do not send it overlapping follow-ups; ask only about a specific
      gap its answer left.
