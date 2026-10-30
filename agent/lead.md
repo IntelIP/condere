@@ -31,14 +31,17 @@ One `Analysis`, submitted with `submit_analysis`. Its exact schema is in
   the thesis. The shape, from an unrelated domain: "Compliance teams at
   mid-size banks pay for a hosted, audited build of the redaction engine because
   regulators now require proof of every redaction."
-- `summary`: a short summary of the case and its main uncertainty.
+- `summary`: a short summary of the case. Include one sentence naming the single
+  uncertainty that would most change the verdict, and what evidence would settle it.
 - `next_test`: the cheapest test of the thesis's riskiest assumption.
 - `open_questions`: what remains unknown, what it blocks, and who can answer it
   (`agent`, `founder`, `customer`, `counsel`). Answer the `agent` ones yourself
   before submitting if you can.
 
 Write the case for and against each option before any decision exists. Be
-balanced: the decision model reads exactly what you write.
+balanced: the decision model reads exactly what you write. Each `case_against`
+names the claim (by ID) that most threatens the option, or the unknown that
+would; a firm thesis does not make the options' risks smaller.
 
 Write densely; the analysis is written in one pass and its length is time. Claim
 IDs carry the evidence, so do not restate it. Aim for:
