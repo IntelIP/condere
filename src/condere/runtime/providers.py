@@ -987,7 +987,7 @@ class ApifyResearch:
         community: str | None = None,
         posted_after: date | None = None,
         max_posts: int = 10,
-        comments_per_post: int = 10,
+        comments_per_post: int = 5,
     ) -> dict:
         """Read specific threads or search posts, with their top comments."""
         if not thread_urls and not query:

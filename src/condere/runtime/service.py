@@ -27,6 +27,7 @@ from condere.runtime.dossier import (
     render_markdown,
 )
 from condere.runtime.evidence import EvidenceError, EvidenceStore, SourceDocument
+from condere.runtime.funnel import source_funnel
 from condere.runtime.reporting import render_figures, render_html
 from condere.runtime.spinoff import (
     Analysis,
@@ -733,6 +734,21 @@ class AssessmentService:
             )
         return sorted(index, key=lambda item: item["id"])
 
+    def funnel(self, owner, assessment_id) -> dict:
+        """How saved sources narrow to the claims the options rely on, per research route."""
+        records = self.state.records(owner, assessment_id)
+        heads = self._heads(records)
+        return source_funnel(
+            [record["payload"] for key, record in heads.items() if key.startswith("source:")],
+            self.state.operations(owner, assessment_id),
+            [
+                record["payload"]
+                for key, record in heads.items()
+                if key.startswith("candidate_claim:")
+            ],
+            self.analysis(owner, assessment_id),
+        )
+
     def finalize_spinoff(self, owner, assessment_id, generation) -> SpinoffResult:
         """Write the artifacts, then atomically publish the compact result and complete."""
         assessment = self.state.get(owner, assessment_id)
@@ -751,7 +767,7 @@ class AssessmentService:
         sources = self._source_index(owner, assessment_id)
         links = {}
         for ref, (text, media_type, summary) in render_artifacts(
-            analysis, decision, brief, sources
+            analysis, decision, brief, sources, self.funnel(owner, assessment_id)
         ).items():
             link = artifact_link(assessment_id, ref, text, media_type, summary)
             self._revise_key(

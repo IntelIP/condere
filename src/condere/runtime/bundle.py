@@ -154,7 +154,7 @@ def _json(value) -> str:
 
 
 def render_artifacts(
-    analysis: Analysis, decision: Decision, brief: str, sources: list[dict]
+    analysis: Analysis, decision: Decision, brief: str, sources: list[dict], funnel: dict
 ) -> dict[str, tuple[str, str, str]]:
     """Every artifact as ref -> (text, media type, one-line summary)."""
     claims: list[Claim] = analysis.claims
@@ -189,6 +189,13 @@ def render_artifacts(
             _json(sources),
             "application/json",
             f"{len(sources)} saved sources with publication dates and origin groups.",
+        ),
+        "artifacts/funnel.json": (
+            _json(funnel),
+            "application/json",
+            f"Source funnel: {funnel['stages']['saved']['sources']} saved, "
+            f"{funnel['stages']['cited']['sources']} cited, "
+            f"{funnel['stages']['decisive']['sources']} behind the options, by research route.",
         ),
         "artifacts/decision-brief.md": (
             brief,

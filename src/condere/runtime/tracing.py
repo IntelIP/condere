@@ -110,6 +110,42 @@ class Tracing:
         with stack:
             yield handle
 
+    def record(
+        self,
+        name: str,
+        *,
+        inputs: Mapping[str, object],
+        outputs: Mapping[str, object],
+        metadata: Mapping[str, object],
+        tags: list[str],
+        scores: Mapping[str, float | None] | None = None,
+    ) -> str | None:
+        """Record a finished non-agent step as its own root trace, with numeric feedback.
+
+        Feedback is the signal Engine and online evaluators rank traces by, so a step's
+        quality measures go there rather than only into its outputs.
+        """
+        try:
+            with tracing_context(enabled=True, client=self.client, **self.destination):
+                with trace(
+                    name,
+                    "chain",
+                    inputs=dict(inputs),
+                    client=self.client,
+                    metadata={**metadata, "method_version": self.release},
+                    tags=tags,
+                    **self.destination,
+                ) as run:
+                    run.add_outputs(dict(outputs))
+            self.client.flush(timeout=5)
+            for key, score in (scores or {}).items():
+                if score is not None:
+                    self.client.create_feedback(run.id, key, score=score)
+            return str(run.trace_id)
+        except Exception:
+            logging.getLogger(__name__).warning("Step trace %s could not be recorded.", name)
+            return None
+
     def record_example(self, handle: WorkerTrace, outputs: Mapping[str, object]) -> None:
         """Add an accepted live answer to the candidate dataset, linked to its trace.
 

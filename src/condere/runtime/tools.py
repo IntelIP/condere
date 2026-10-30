@@ -434,7 +434,7 @@ def worker_tools(
         community: str | None = None,
         posted_after: date | None = None,
         max_posts: int = 10,
-        comments_per_post: int = 10,
+        comments_per_post: int = 5,
     ) -> dict:
         """Read Reddit threads or search posts with top comments: user pain, costs, switching.
 

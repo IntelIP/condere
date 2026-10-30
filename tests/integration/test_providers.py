@@ -648,8 +648,9 @@ def test_apify_runs_are_capped_upstream_and_saved_with_origin_groups(provider_ca
     assert json.loads(requests[0].content)["tweetIds"] == ["2115777960355708930"]
     # One tweet costs far below the minimum cap that keeps the Actor from returning nothing.
     assert Decimal(requests[0].url.params["maxTotalChargeUsd"]) == Decimal("0.01")
-    # Five posts with ten comments each is 55 results: (0.02 + 55 * 0.002) * 1.25.
-    assert Decimal(requests[1].url.params["maxTotalChargeUsd"]) == Decimal("0.1625")
+    # Five posts with five comments each (the default) is 30 results: (0.02 + 30 * 0.002) * 1.25.
+    assert Decimal(requests[1].url.params["maxTotalChargeUsd"]) == Decimal("0.1")
+    assert json.loads(requests[1].content)["maxCommentsPerPost"] == 5
     tweet = tweets["results"][0]
     assert tweet["published_at"] == "2026-10-29T12:09:09+00:00"
     assert tweet["origin_group"] == "x:conversation:2115760778951409799"

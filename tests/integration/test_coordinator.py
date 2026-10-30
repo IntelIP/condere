@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -319,6 +320,9 @@ async def test_native_lead_run_records_analysis_and_one_decision(native_case):
     assert "upgrades keep breaking" in claims["text"]
     reasoning = service.artifact(owner, case["id"], "artifacts/reasoning.md", limit=200)
     assert reasoning["next_offset"] == 200
+    funnel = json.loads(service.artifact(owner, case["id"], "artifacts/funnel.json")["text"])
+    assert funnel == service.funnel(owner, case["id"])
+    assert funnel["stages"]["decisive"]["sources"] >= 1
     assert (await make().run(owner, case["id"])) == result
     assert service.report(owner, case["id"]) == result
     assert sorted(calls) == [("code-analyst", 1), ("extractor", 1), ("lead", 1), ("planner", 1)]

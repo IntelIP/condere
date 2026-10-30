@@ -299,9 +299,11 @@ class AssessmentCoordinator:
                             await self._run_unit(
                                 owner, assessment_id, generation, "planner", plan, checkpointer
                             )
-                    return await asyncio.to_thread(
+                    result = await asyncio.to_thread(
                         self.service.finalize_spinoff, owner, assessment_id, generation
                     )
+                    await asyncio.to_thread(self._trace_funnel, owner, assessment_id, generation)
+                    return result
                 creation = asyncio.create_task(
                     asyncio.to_thread(
                         SmolSandbox.create,
@@ -362,9 +364,55 @@ class AssessmentCoordinator:
         finally:
             if hasattr(jev, "close"):
                 jev.close()
-        return self.service.record_decision(owner, assessment_id, decision, brief, analysis_hash)[
+        saved = self.service.record_decision(owner, assessment_id, decision, brief, analysis_hash)[
             "payload"
         ]
+        if self.tracing is not None:
+            self.tracing.record(
+                "condere.decision",
+                inputs={"brief": brief, "analysis_hash": analysis_hash},
+                outputs=saved["decision"],
+                metadata=self._step_metadata(assessment_id, generation, "decision"),
+                tags=["condere", "decision"],
+                scores={
+                    "verdict_confidence": decision.verdict.confidence,
+                    "contested_count": len(decision.contested),
+                    "code_adjustments": len(decision.adjustments),
+                },
+            )
+        return saved
+
+    def _step_metadata(self, assessment_id, generation, role) -> dict:
+        return {
+            "assessment_id": assessment_id,
+            "generation": generation,
+            "role": role,
+            "execution_mode": self.service.execution_mode,
+        }
+
+    def _trace_funnel(self, owner, assessment_id, generation):
+        """Trace how far each research route's sources travel toward the decision."""
+        if self.tracing is None:
+            return
+        funnel = self.service.funnel(owner, assessment_id)
+        stages, claims = funnel["stages"], funnel["claims"]
+        saved = stages["saved"]["sources"]
+        self.tracing.record(
+            "condere.funnel",
+            inputs={"assessment_id": assessment_id},
+            outputs=funnel,
+            metadata=self._step_metadata(assessment_id, generation, "funnel"),
+            tags=["condere", "funnel"],
+            scores={
+                "sources_saved": saved,
+                "sources_cited": stages["cited"]["sources"],
+                "decisive_origin_groups": stages["decisive"]["origin_groups"],
+                "citation_yield": round(stages["cited"]["sources"] / saved, 3) if saved else None,
+                "candidate_use": round(claims["candidates_used"] / claims["candidates"], 3)
+                if claims["candidates"]
+                else None,
+            },
+        )
 
     def _worker_trace(self, worker, assessment_id, generation, brief, indexes):
         if self.tracing is None:

@@ -128,3 +128,35 @@ def evaluate_result(
         },
     ]
     return scores
+
+
+def funnel_scores(funnel: dict) -> list[dict]:
+    """How much of what was retrieved reached the claims the options rely on."""
+    stages, claims = funnel["stages"], funnel["claims"]
+    saved = stages["saved"]["sources"]
+    scores = [
+        {"key": "sources_saved", "score": saved},
+        {"key": "decisive_origin_groups", "score": stages["decisive"]["origin_groups"]},
+        {
+            "key": "citation_yield",
+            "score": round(stages["cited"]["sources"] / saved, 3) if saved else None,
+            "comment": f"{stages['cited']['sources']} of {saved} saved sources cited.",
+        },
+        {
+            "key": "candidate_use",
+            "score": round(claims["candidates_used"] / claims["candidates"], 3)
+            if claims["candidates"]
+            else None,
+            "comment": f"{claims['candidates_used']} of {claims['candidates']} candidates used.",
+        },
+    ]
+    for route, row in funnel["routes"].items():
+        scores.append(
+            {
+                "key": f"route_{route.replace(':', '_')}_decisive",
+                "score": row["decisive"],
+                "comment": f"{row['calls']} calls, {row['saved']} saved, {row['claimed']} claimed, "
+                f"{row['cited']} cited, {row['decisive']} behind the options.",
+            }
+        )
+    return scores
