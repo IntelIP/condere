@@ -80,6 +80,11 @@ CLAUDE_HAIKU = ModelSpec(
     {"prompt": 0.1, "completion": 0.5},
     forced_tool_choice=False,
 )
+# OpenRouter holds credit for every in-flight request and refuses new ones past it (402), and
+# its admission control refuses bursts (429): on 2026-10-30 ten parallel subagents across two
+# assessments had their first code-analysis calls refused. Wait for a slot instead.
+OPENROUTER_CONCURRENCY = 4
+_OPENROUTER_SLOTS = threading.BoundedSemaphore(OPENROUTER_CONCURRENCY)
 # The working context Deep Agents may fill before it summarises a conversation (it compacts
 # at 85% of `max_input_tokens`). A 48,000-token target suited the retired one-question
 # workers; for the spin-off lead it triggered summaries at ~26k real tokens. Run 4
@@ -293,22 +298,23 @@ class AccountedChatOpenAI(ChatOpenAI):
                 cost_basis=basis,
             )
 
-        operation = execute_once(
-            context.state,
-            owner=context.owner,
-            assessment_id=context.assessment_id,
-            generation=context.generation,
-            key=key,
-            kind="openrouter",
-            request=payload,
-            max_microusd=maximum,
-            dispatch_identity={
-                "provider": "openrouter",
-                "model": spec.id,
-                "local_request_key": key,
-            },
-            invoke=invoke,
-        )
+        with _OPENROUTER_SLOTS:
+            operation = execute_once(
+                context.state,
+                owner=context.owner,
+                assessment_id=context.assessment_id,
+                generation=context.generation,
+                key=key,
+                kind="openrouter",
+                request=payload,
+                max_microusd=maximum,
+                dispatch_identity={
+                    "provider": "openrouter",
+                    "model": spec.id,
+                    "local_request_key": key,
+                },
+                invoke=invoke,
+            )
         if operation["state"] != "succeeded":
             raise previously_failed("openrouter", operation)
         result = _decode_result(operation["result"])

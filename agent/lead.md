@@ -51,7 +51,8 @@ when evidence changes them:
      scope in one task (`asset-understanding`, `rights-and-ownership`): components and
      paths, build and deployment, dependencies and licenses, operating burden,
      maturity. Do not send it overlapping follow-ups; ask only about a specific
-     gap its answer left.
+     gap its answer left. If its task stops because a model call failed, send
+     the same task again at once rather than after the research.
    - Delegate one `extractor` task per source route (`buyer-evidence`,
      `search-routing`), each with the same buyer questions (who has the pain,
      what it costs, what they use today, what they pay, why they would or would

@@ -58,6 +58,12 @@ CALLBACK_PORT = 1455
 CALLBACK_PATH = "/auth/callback"
 DEFAULT_HOME = Path.home() / ".local/share/condere-mda/chatgpt"
 PLAN_MODEL = "gpt-6.1-sol"
+# OpenAI's most capable model (reasoning and coding), the plan-route counterpart of Claude Opus
+# for code analysis. Owner direction 2026-10-30: run code analysis on ChatGPT plan usage after
+# two Opus code analyses cost $11.92 and $12.96 on OpenRouter. Both models answered on the
+# plan route the same day.
+PLAN_CODE_MODEL = "gpt-6-astra"
+PLAN_MODELS = {PLAN_MODEL, PLAN_CODE_MODEL}
 REFRESH_MARGIN_SECONDS = 300
 # Responses fields this route rejects (preview limitations, checked 2026-10-28).
 UNSUPPORTED_FIELDS = {
@@ -455,8 +461,8 @@ class PlanChatOpenAI(ChatOpenAI):
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         payload = {key: value for key, value in payload.items() if key not in UNSUPPORTED_FIELDS}
-        if payload.get("model") != PLAN_MODEL:
-            raise ValueError("The plan route uses only the selected Condere model.")
+        if payload.get("model") not in PLAN_MODELS:
+            raise ValueError("The plan route uses only the selected Condere models.")
         payload |= {"store": False, "stream": True}
         functions = []
         for tool in payload.pop("tools", []):
@@ -599,7 +605,7 @@ class PlanChatOpenAI(ChatOpenAI):
                     "allowed it in ChatGPT settings.",
                     "Manage usage at " + USAGE_URL,
                 ],
-                "model": PLAN_MODEL,
+                "model": self.model_name,
             }
             if failure is not None:
                 return ProviderResult(
@@ -612,7 +618,7 @@ class PlanChatOpenAI(ChatOpenAI):
                 response, output_version="responses/v1"
             )
             usage = response.usage.model_dump(exclude_none=True) if response.usage else {}
-            result.llm_output = {"token_usage": usage, "model_name": PLAN_MODEL}
+            result.llm_output = {"token_usage": usage, "model_name": self.model_name}
             return ProviderResult(
                 _encode_result(result), actual_microusd=0, cost_basis=basis | {"usage": usage}
             )
@@ -628,7 +634,7 @@ class PlanChatOpenAI(ChatOpenAI):
             max_microusd=0,
             dispatch_identity={
                 "provider": "chatgpt_plan",
-                "model": PLAN_MODEL,
+                "model": self.model_name,
                 "local_request_key": key,
             },
             invoke=invoke,
@@ -655,12 +661,18 @@ class PlanChatOpenAI(ChatOpenAI):
 
 
 def plan_model(
-    context: ProviderContext, credentials: PlanCredentials, *, http_client=None
+    context: ProviderContext,
+    credentials: PlanCredentials,
+    *,
+    model: str = PLAN_MODEL,
+    http_client=None,
 ) -> PlanChatOpenAI:
     if credentials.load() is None:
         raise SignInRequired("Run the Condere ChatGPT sign-in before a live assessment.")
-    model = PlanChatOpenAI(
-        model=PLAN_MODEL,
+    if model not in PLAN_MODELS:
+        raise ValueError(f"{model} is not a selected plan-route model.")
+    chat = PlanChatOpenAI(
+        model=model,
         api_key="chatgpt-plan-token-supplied-per-request",
         base_url=RESOURCE,
         max_retries=0,
@@ -678,6 +690,6 @@ def plan_model(
         },
         http_client=http_client,
     )
-    model._context = context
-    model._credentials = credentials
-    return model
+    chat._context = context
+    chat._credentials = credentials
+    return chat

@@ -13,9 +13,10 @@ import uvicorn
 
 from condere.interfaces.api import create_app
 from condere.interfaces.mcp import validate_api_url
-from condere.runtime.chatgpt_plan import DEFAULT_HOME, PlanCredentials
+from condere.runtime.chatgpt_plan import DEFAULT_HOME, PLAN_CODE_MODEL, PlanCredentials
 from condere.runtime.coordinator import AssessmentCoordinator
 from condere.runtime.evidence import EvidenceStore, object_client
+from condere.runtime.providers import CLAUDE_OPUS
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import AssessmentStore
 from condere.runtime.tracing import Tracing
@@ -100,9 +101,14 @@ def build_app():
     tracing = None
     try:
         evidence = EvidenceStore(state, objects, values["CONDERE_EVIDENCE_BUCKET"])
-        service = AssessmentService(state, evidence, execution_mode="live")
-        tracing = Tracing.from_environment(values, release=service.method_version)
         provider, plan = values["CONDERE_MODEL_PROVIDER"], None
+        service = AssessmentService(
+            state,
+            evidence,
+            execution_mode="live",
+            code_model_id=PLAN_CODE_MODEL if provider == "chatgpt" else CLAUDE_OPUS.id,
+        )
+        tracing = Tracing.from_environment(values, release=service.method_version)
         if provider == "chatgpt":
             plan = PlanCredentials(Path(values.get("CONDERE_CHATGPT_HOME") or DEFAULT_HOME))
             if not plan.status()["plan_usage"]:

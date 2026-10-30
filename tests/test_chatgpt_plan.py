@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 from condere.runtime.chatgpt_plan import (
+    PLAN_CODE_MODEL,
     PLAN_MODEL,
     PLAN_SCOPE,
     PlanCredentials,
@@ -227,6 +228,16 @@ def test_requests_follow_the_plan_route_contract(home):
     assert [item["name"] for item in namespace["tools"]] == ["read_assessment"]
     assert payload["input"][0]["role"] == "developer"
     assert json.dumps(payload).count("chatgpt-plan-token") == 0
+
+
+def test_code_analysis_may_use_astra_and_no_other_model(home):
+    credentials = saved(home, token_endpoint([]), expires_at=4_000_000_000)
+    context = ProviderContext(None, "owner", "case", 1, "code-analyst")
+    model = plan_model(context, credentials, model=PLAN_CODE_MODEL)
+    payload = model._get_request_payload([HumanMessage("Read the code.")])
+    assert payload["model"] == "gpt-6-astra"
+    with pytest.raises(ValueError, match="not a selected plan-route model"):
+        plan_model(context, credentials, model="gpt-4o")
 
 
 def test_model_requires_sign_in(home):

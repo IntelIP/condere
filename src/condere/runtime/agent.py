@@ -30,7 +30,10 @@ METHODS_ROOT = Path(__file__).resolve().parents[3] / "agent"
 # Live runs on 2026-10-28 resent every earlier tool result on each call (~20 calls,
 # 7k -> 40k input tokens per worker) and the plan route gave little prompt caching.
 # Clear older tool outputs past this size; saved sources stay retrievable by ID.
-CONTEXT_EDIT_TRIGGER_TOKENS = 24_000
+# With the 200k working context (no early summaries), a 24k trigger cleared tool output on
+# every turn and agents re-read the same sources: on 2026-10-30 one extractor called
+# read_source 78 times and the code analyst search_saved_sources 41 times.
+CONTEXT_EDIT_TRIGGER_TOKENS = 80_000
 PROTECTED_TOOLS = ("read_assessment", "submit_analysis")
 # The instructions each model reads; they and the skills determine the method version.
 PROMPTS = ("lead.md", "planner.md", "subagents/code-analyst.md", "subagents/extractor.md")
@@ -70,8 +73,8 @@ def method_version(root: Path = METHODS_ROOT) -> str:
 CODE_ANALYST_SKILLS = ["repository-index", "code-exploration"]
 
 
-def code_method_version(root: Path = METHODS_ROOT) -> str:
-    digest = hashlib.sha256(CLAUDE_OPUS.id.encode())
+def code_method_version(root: Path = METHODS_ROOT, model_id: str = CLAUDE_OPUS.id) -> str:
+    digest = hashlib.sha256(model_id.encode())
     digest.update(hashlib.sha256((root / "subagents/code-analyst.md").read_bytes()).digest())
     for path, content in method_files(root, CODE_ANALYST_SKILLS).items():
         if path.startswith("/workspace/skills/"):

@@ -12,7 +12,12 @@ from uuid import uuid4
 import httpx
 from smol import ConnectOptions, Machine
 
-from condere.runtime.chatgpt_plan import PlanChatOpenAI, PlanCredentials, plan_model
+from condere.runtime.chatgpt_plan import (
+    PLAN_CODE_MODEL,
+    PlanChatOpenAI,
+    PlanCredentials,
+    plan_model,
+)
 from condere.runtime.checkpoints import checkpoint_store
 from condere.runtime.decision import decide
 from condere.runtime.evidence import EvidenceError
@@ -504,6 +509,10 @@ class AssessmentCoordinator:
                     subagents.append(
                         self._model_factory(ledger)
                         if self._model_factory
+                        # Code analysis runs on GPT-6 Astra with ChatGPT plan usage when the
+                        # owner signed in; Opus on OpenRouter remains the paid alternative.
+                        else plan_model(ledger, self.plan_credentials, model=PLAN_CODE_MODEL)
+                        if subagent == "code-analyst" and self.plan_credentials is not None
                         else accounted_model(ledger, self._router_key, spec=spec)
                     )
             worker_trace = WorkerTrace()

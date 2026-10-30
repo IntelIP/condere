@@ -10,6 +10,7 @@ from condere.runtime.contracts import IntakeBrief
 from condere.runtime.decision import render_brief
 from condere.runtime.evidence import EvidenceError, EvidenceStore, SourceDocument
 from condere.runtime.funnel import source_funnel
+from condere.runtime.providers import CLAUDE_OPUS
 from condere.runtime.spinoff import (
     Analysis,
     BuildPlan,
@@ -80,12 +81,20 @@ class _FixedTimeZip:
 
 
 class AssessmentService:
-    def __init__(self, state: AssessmentStore, evidence: EvidenceStore, *, execution_mode: str):
+    def __init__(
+        self,
+        state: AssessmentStore,
+        evidence: EvidenceStore,
+        *,
+        execution_mode: str,
+        code_model_id: str = CLAUDE_OPUS.id,
+    ):
         if execution_mode not in {"simulation", "live"}:
             raise ValueError("Select simulation or live execution explicitly.")
         self.state, self.evidence, self.execution_mode = state, evidence, execution_mode
         self.method_version = method_version()
-        self.code_method = code_method_version()
+        # Reused code claims must come from the same code-analysis model as this service runs.
+        self.code_method = code_method_version(model_id=code_model_id)
         self.policy_version = POLICY_VERSION + ":" + execution_mode
 
     def _compatible(self, assessment: dict) -> None:
