@@ -9,6 +9,7 @@ import base64
 import ipaddress
 import json
 import re
+import threading
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -778,6 +779,10 @@ APIFY_ACTORS = {
     "youtube": ApifyActor("johnvc~YoutubeTranscripts", Decimal("0.00001"), Decimal("0.00276")),
 }
 APIFY_MARGIN = Decimal("1.25")
+# The FREE plan runs at most 5 Actor jobs at once; parallel extractors sent 7 on 2026-10-30
+# and the refused runs stopped the assessment. Wait for a slot before reserving a run.
+APIFY_CONCURRENCY = 4
+_APIFY_SLOTS = threading.BoundedSemaphore(APIFY_CONCURRENCY)
 # A very small maxTotalChargeUsd makes Actors return nothing: a $0.0002 cap on a one-tweet
 # lookup produced an empty run, while $0.01 succeeded (2026-10-30). Never cap below this.
 APIFY_MIN_CHARGE_USD = Decimal("0.01")
@@ -1051,7 +1056,14 @@ class ApifyResearch:
                 raise ValueError("The Actor did not return a dataset item list.")
             return ProviderResult({"items": data, "retrieved_at": datetime.now(UTC).isoformat()})
 
-        operation = execute_once(
+        with _APIFY_SLOTS:
+            operation = self._dispatch(
+                context, key, actor, body, params, bound, material_gap, invoke
+            )
+        return self._save(platform, actor, operation, bound)
+
+    def _dispatch(self, context, key, actor, body, params, bound, material_gap, invoke):
+        return execute_once(
             context.state,
             owner=context.owner,
             assessment_id=context.assessment_id,
@@ -1068,6 +1080,9 @@ class ApifyResearch:
             },
             invoke=invoke,
         )
+
+    def _save(self, platform, actor, operation, bound) -> dict:
+        context = self.context
         if operation["state"] != "succeeded":
             raise Conflict("The saved research operation failed; it will not be purchased again.")
         saved = operation["result"]

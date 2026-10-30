@@ -655,3 +655,38 @@ def test_apify_runs_are_capped_upstream_and_saved_with_origin_groups(provider_ca
     assert pending["pending_microusd"] == sum(
         item["reserved_microusd"] for item in operations(context)
     )
+
+
+def test_apify_runs_never_exceed_the_plan_concurrency(provider_case):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from condere.runtime.providers import APIFY_CONCURRENCY
+
+    context, evidence = provider_case
+    lock, active, peak = threading.Lock(), [0], [0]
+
+    def respond(request):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.2)
+        with lock:
+            active[0] -= 1
+        return httpx.Response(201, json=[])
+
+    apify = ApifyResearch(
+        context, evidence, "fake-apify-token", transport=httpx.MockTransport(respond)
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=7) as pool:
+            list(
+                pool.map(
+                    lambda index: apify.x_posts((str(10_000 + index),), "Need the post"),
+                    range(7),
+                )
+            )
+    finally:
+        apify.close()
+    assert 1 < peak[0] <= APIFY_CONCURRENCY
