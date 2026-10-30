@@ -351,3 +351,50 @@ def test_continuation_cannot_change_admitted_policy_or_methods(setup_case):
         service.begin(owner, case["id"], resume=True)
     assert service.state.spending(owner, case["id"]) == before
     assert service.state.get(owner, case["id"])["generation"] == case["generation"]
+
+
+def test_claims_ledger_saves_verified_claims_and_expands_references(setup_case):
+    from test_coordinator import analysis_payload
+
+    service, owner, case = setup_case
+    source = service.evidence.save_source(
+        owner,
+        case["id"],
+        kind="web",
+        origin="https://example.com/ledger",
+        original=b"Operators report upgrades keep breaking in production.",
+        text="Operators report upgrades keep breaking in production.",
+        media_type="text/plain",
+        provenance={"provider": "simulation"},
+        limitations=["Fixture."],
+    )
+    lead = worker(service, owner, case, "lead")
+    observed = {
+        "statement": "Operators report upgrade breakage.",
+        "status": "observed",
+        "citations": [{"source_id": source.id, "quote": "upgrades keep breaking"}],
+    }
+    forged = observed | {"citations": [{"source_id": source.id, "quote": "never said this"}]}
+    saved = service.submit_claims(
+        owner,
+        case["id"],
+        case["generation"],
+        lead["id"],
+        [observed, forged, observed],
+        origin="extractor",
+    )
+    first, duplicate = saved["accepted"]
+    assert first["candidate"] == duplicate["candidate"]
+    assert [item["index"] for item in saved["rejected"]] == [1]
+    assert "not found" in saved["rejected"][0]["error"]
+    [listed] = service.candidate_claims(owner, case["id"])
+    assert listed["candidate"] == first["candidate"] and listed["source_ids"] == [source.id]
+    payload = analysis_payload(source.id)
+    payload["claims"][0] = {"id": "C1", "candidate": first["candidate"]}
+    service.submit_analysis(owner, case["id"], case["generation"], lead["id"], payload)
+    claim = service.analysis(owner, case["id"]).claim("C1")
+    assert claim.candidate == first["candidate"] and claim.status == "observed"
+    assert claim.citations[0].text_sha256 == source.text_sha256
+    payload["claims"][0] = {"id": "C1", "candidate": "X0000000000"}
+    with pytest.raises(ValueError, match="unknown candidate"):
+        service.submit_analysis(owner, case["id"], case["generation"], lead["id"], payload)

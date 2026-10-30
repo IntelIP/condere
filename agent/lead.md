@@ -62,9 +62,15 @@ when evidence changes them:
 6. Submit the analysis. Fix every rejection's stated cause and resubmit.
 
 Delegate with a specific task: the question, the route or sources to use, and
-the expected output. Subagents return claims; you merge them, assign IDs, and
-keep their quotes exact. You read their claims and summaries, not raw pages;
-open a source yourself only to settle a conflict or check a decisive quote.
+the expected output. Subagents save each verified claim with `submit_claims` as
+they work; `read_assessment` lists every saved claim under `candidate_claims`
+(candidate ID, statement, status, date, sources). Use them: include a saved claim
+in your analysis by reference, `{"id": "C7", "candidate": "X0123456789"}`, without
+restating its text or quotes. Write a claim in full only for your own inference
+(`modelled`), an assumption, an unknown, or a quote you verified yourself. Support
+each option's case with every relevant saved claim, preferring independent
+origins and recent sources. Open a source yourself only to settle a conflict or
+check a decisive quote.
 
 ## Evidence discipline
 

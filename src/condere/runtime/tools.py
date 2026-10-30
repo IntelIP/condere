@@ -30,7 +30,7 @@ from condere.runtime.providers import ApifyResearch, ExaResearch
 from condere.runtime.repositories import canonical_repository, stage_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
-from condere.runtime.spinoff import Analysis, BuildPlan
+from condere.runtime.spinoff import Analysis, BuildPlan, ExtractedClaim
 from condere.runtime.state import Conflict, NotFound, content_hash
 
 # Bounded correction: a worker may fix rejected submissions, but not loop indefinitely.
@@ -204,6 +204,8 @@ def worker_tools(
         }
         if assigned["assignment"]["role"] == "review":
             result["review_context"] = service.review_context(owner, assessment_id)
+        if assigned["assignment"]["role"] == "lead":
+            result["candidate_claims"] = service.candidate_claims(owner, assessment_id)
         return result
 
     @tool
@@ -638,6 +640,27 @@ def worker_tools(
         )
 
     @tool
+    def submit_claims(
+        claims: list[ExtractedClaim],
+        origin: Literal["lead", "code-analyst", "extractor"] = "lead",
+    ) -> dict:
+        """Save verified claims as soon as you find them; returns an ID for each.
+
+        Each claim needs a statement, a status and, when observed or reported, a citation
+        with source_id and the exact quoted text. Rejected claims return the reason; fix
+        and resubmit them. The lead includes a saved claim in its analysis by ID.
+        """
+        guard("submit_claims")
+        return service.submit_claims(
+            owner,
+            assessment_id,
+            generation,
+            worker_id,
+            [claim.model_dump(mode="json") for claim in claims],
+            origin=origin,
+        )
+
+    @tool
     def submit_analysis(
         payload: Analysis | None = None,
         supersedes_hash: str | None = None,
@@ -730,6 +753,7 @@ def worker_tools(
         youtube_transcripts,
         inspect_repository,
         submit_question,
+        submit_claims,
         submit_analysis,
         submit_build_plan,
         submit_review,

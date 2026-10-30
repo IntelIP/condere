@@ -48,15 +48,31 @@ CONTESTED_MARGIN = 0.15
 SUMMARY_LIMIT = 1_500
 
 
+CandidateId = Annotated[str, StringConstraints(pattern=r"^X[0-9a-f]{10}$")]
+
+
 class Claim(Record):
+    """A claim written by the lead, or a reference to a saved, verified candidate claim.
+
+    A reference gives only `id` and `candidate`; the service expands it from the saved
+    record before the analysis is accepted, and the saved claim keeps its candidate ID.
+    """
+
     id: ClaimId
-    statement: Text
-    status: ClaimStatus
+    candidate: CandidateId | None = None
+    statement: Text | None = None
+    status: ClaimStatus | None = None
     citations: list[Citation] = Field(default_factory=list)
     origin_groups: list[Text] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def evidenced_status(self) -> Self:
+        if self.statement is None or self.status is None:
+            if self.candidate is None:
+                raise ValueError(f"{self.id} needs a statement and status, or a candidate ID.")
+            if self.citations or self.origin_groups:
+                raise ValueError(f"{self.id} references {self.candidate}; do not restate it.")
+            return self
         if self.status in EVIDENCED and not self.citations:
             raise ValueError(f"{self.id} is {self.status} but cites no source passage.")
         if self.status == "unknown" and self.citations:
@@ -189,6 +205,9 @@ class Analysis(Record):
 
     def claim(self, claim_id: str) -> Claim:
         return next(claim for claim in self.claims if claim.id == claim_id)
+
+    def unexpanded(self) -> list[str]:
+        return [claim.id for claim in self.claims if claim.statement is None]
 
 
 class WorkPackage(Record):
@@ -478,6 +497,14 @@ class ExtractedClaim(Record):
     published_at: Text | None = None
     citations: list[Citation] = Field(default_factory=list)
     origin_groups: list[Text] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def evidenced_status(self) -> Self:
+        if self.status in EVIDENCED and not self.citations:
+            raise ValueError(f"A {self.status} claim must cite an exact source passage.")
+        if self.status == "unknown" and self.citations:
+            raise ValueError("An unknown claim cites nothing.")
+        return self
 
 
 class ClaimBatch(Record):

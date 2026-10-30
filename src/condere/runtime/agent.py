@@ -133,6 +133,7 @@ def build_agent(
 
 
 CODE_ANALYST_TOOLS = {
+    "submit_claims",
     "read_assessment",
     "list_sources",
     "search_saved_sources",
@@ -140,6 +141,7 @@ CODE_ANALYST_TOOLS = {
     "inspect_repository",
 }
 EXTRACTOR_TOOLS = {
+    "submit_claims",
     "read_assessment",
     "list_sources",
     "search_saved_sources",

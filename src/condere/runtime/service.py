@@ -27,7 +27,13 @@ from condere.runtime.dossier import (
 )
 from condere.runtime.evidence import EvidenceError, EvidenceStore, SourceDocument
 from condere.runtime.reporting import render_figures, render_html
-from condere.runtime.spinoff import Analysis, BuildPlan, Decision, SpinoffResult
+from condere.runtime.spinoff import (
+    Analysis,
+    BuildPlan,
+    Decision,
+    ExtractedClaim,
+    SpinoffResult,
+)
 from condere.runtime.state import AssessmentStore, Conflict, NotFound, content_hash
 
 POLICY_VERSION = "condere-mda-v3"
@@ -84,7 +90,7 @@ RESEARCH_TOOLS = {
     ],
     "review": [],
 }
-RESEARCH_TOOLS["lead"] = list(RESEARCH_TOOLS["technical"])
+RESEARCH_TOOLS["lead"] = [*RESEARCH_TOOLS["technical"], "submit_claims"]
 RESEARCH_TOOLS["planner"] = ["inspect_repository"]
 SUBMIT_TOOL = {
     "screen": "submit_screen",
@@ -305,9 +311,12 @@ class AssessmentService:
     ) -> dict:
         """Accept the lead's analysis once every quote matches its saved source."""
         self._worker(owner, assessment_id, generation, worker_id, "lead")
+        payload = self._expand_candidates(owner, assessment_id, payload)
         analysis = Analysis.model_validate(
             self.evidence.resolve_citations(owner, assessment_id, payload)
         )
+        if missing := analysis.unexpanded():
+            raise ValueError(f"Claims {missing} reference no saved candidate claim.")
         for claim in analysis.claims:
             for citation in claim.citations:
                 self.evidence.verify_citation(owner, assessment_id, citation)
@@ -321,6 +330,81 @@ class AssessmentService:
             generation=generation,
             worker_id=worker_id,
         )
+
+    def submit_claims(
+        self, owner, assessment_id, generation, worker_id, claims: list[dict], *, origin: str
+    ) -> dict:
+        """Save each verified claim as a candidate the lead can reference by ID.
+
+        Claims are checked one by one; a rejected claim returns its reason so it can be
+        fixed, without discarding the accepted ones. Identical claims share one ID.
+        """
+        self._worker(owner, assessment_id, generation, worker_id, "lead")
+        accepted, rejected = [], []
+        for index, item in enumerate(claims):
+            try:
+                claim = ExtractedClaim.model_validate(
+                    self.evidence.resolve_citations(owner, assessment_id, item)
+                )
+                for citation in claim.citations:
+                    self.evidence.verify_citation(owner, assessment_id, citation)
+            except (ValueError, EvidenceError, NotFound) as error:
+                rejected.append({"index": index, "error": str(error)[:500]})
+                continue
+            payload = claim.model_dump(mode="json") | {"origin": origin}
+            identity = "X" + content_hash(claim.model_dump(mode="json"))[:10]
+            self.state.append_record(
+                owner,
+                assessment_id,
+                "candidate_claim",
+                identity,
+                payload,
+                generation=generation,
+                worker_id=worker_id,
+            )
+            accepted.append({"index": index, "candidate": identity})
+        return {"accepted": accepted, "rejected": rejected}
+
+    def candidate_claims(self, owner, assessment_id) -> list[dict]:
+        """A compact listing for the lead: no quotes, just what each claim says and cites."""
+        heads = self._heads(self.state.records(owner, assessment_id, kind="candidate_claim"))
+        return [
+            {
+                "candidate": record["record_key"],
+                "statement": record["payload"]["statement"],
+                "status": record["payload"]["status"],
+                "published_at": record["payload"].get("published_at"),
+                "source_ids": sorted(
+                    {item["source_id"] for item in record["payload"].get("citations", [])}
+                ),
+                "origin": record["payload"].get("origin"),
+            }
+            for record in sorted(heads.values(), key=lambda item: item["created_at"])
+        ]
+
+    def _expand_candidates(self, owner, assessment_id, payload: dict) -> dict:
+        claims = payload.get("claims") if isinstance(payload, dict) else None
+        if not isinstance(claims, list):
+            return payload
+        heads = self._heads(self.state.records(owner, assessment_id, kind="candidate_claim"))
+        expanded = []
+        for claim in claims:
+            reference = claim.get("candidate") if isinstance(claim, dict) else None
+            if reference and claim.get("statement") is None:
+                record = heads.get("candidate_claim:" + reference)
+                if record is None:
+                    raise ValueError(f"{claim.get('id')} references unknown candidate {reference}.")
+                saved = record["payload"]
+                claim = {
+                    "id": claim["id"],
+                    "candidate": reference,
+                    "statement": saved["statement"],
+                    "status": saved["status"],
+                    "citations": saved.get("citations", []),
+                    "origin_groups": saved.get("origin_groups", []),
+                }
+            expanded.append(claim)
+        return payload | {"claims": expanded}
 
     def submit_build_plan(
         self, owner, assessment_id, generation, worker_id, payload, *, supersedes_hash=None
