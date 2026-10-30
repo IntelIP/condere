@@ -182,3 +182,22 @@ def test_transient_overload_is_retried_with_each_attempt_recorded(
     first, second = context.state.operations(context.owner, context.assessment_id)
     assert first["state"] == "failed" and second["state"] == "succeeded"
     assert second["operation_key"] == first["operation_key"] + ":retry-1"
+
+
+def test_items_delivered_only_as_stream_events_are_kept(provider_case, tmp_path):
+    context, _ = provider_case
+    event = completed()
+    item = event["response"]["output"][0]
+    event["response"]["output"] = []
+    added = {"type": "response.output_item.done", "sequence_number": 0, "output_index": 0}
+
+    def respond(request):
+        return sse(added | {"item": item}, event)
+
+    model = plan_model(
+        context,
+        credentials(tmp_path),
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    message = model.invoke([HumanMessage("Read the assessment.")])
+    assert [call["name"] for call in message.tool_calls] == ["read_assessment"]

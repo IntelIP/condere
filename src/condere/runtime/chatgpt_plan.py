@@ -508,9 +508,19 @@ class PlanChatOpenAI(ChatOpenAI):
         )
         try:
             with client.responses.create(**payload) as stream:
+                # The plan route can complete with an empty `output` and deliver the items only
+                # as output_item.done events (a live lead call on 2026-10-30 lost its tool call).
+                items = {}
                 for event in stream:
+                    if event.type == "response.output_item.done":
+                        items[event.output_index] = event.item
                     if event.type == "response.completed":
-                        return event.response, None
+                        response = event.response
+                        if not response.output and items:
+                            response = response.model_copy(
+                                update={"output": [items[index] for index in sorted(items)]}
+                            )
+                        return response, None
                     if event.type in {"response.failed", "response.incomplete"}:
                         error = getattr(event.response, "error", None)
                         details = getattr(event.response, "incomplete_details", None)
