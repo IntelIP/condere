@@ -11,7 +11,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import ROUND_CEILING, Decimal
 from urllib.parse import urlsplit
 
@@ -77,9 +77,46 @@ MODEL_CONTEXT_TOKENS = GPT_SOL.context_tokens
 MODEL_OUTPUT_TOKENS = GPT_SOL.output_tokens
 PROMPT_USD_PER_TOKEN = GPT_SOL.prompt_usd_per_token
 OUTPUT_USD_PER_TOKEN = GPT_SOL.output_usd_per_token
-SEARCH_BOUND_MICROUSD = 7_000  # auto search, <=10 results, text only; 2026-10-21 docs.
-CONTENTS_BOUND_MICROUSD = 1_000  # one URL, text only; 2026-10-21 docs.
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# Exa published prices, checked 2026-10-30: base request covers 1-10 results; results
+# 11-25 add $1/1k; each page's text or highlights is $1/1k pages; >25 needs Enterprise.
+EXA_REQUEST_USD = {
+    "auto": Decimal("0.007"),
+    "deep-lite": Decimal("0.012"),
+    "deep": Decimal("0.012"),
+}
+EXA_EXTRA_RESULT_USD = Decimal("0.001")
+EXA_PAGE_CONTENT_USD = Decimal("0.001")
+# Exa publishes no price for live fetching or additional deep queries; bound them generously.
+EXA_LIVE_PAGE_MARGIN_USD = Decimal("0.002")
+EXA_ADDITIONAL_QUERY_USD = Decimal("0.007")
+EXA_MAX_RESULTS = 25
+EXA_ADDITIONAL_QUERIES = 5
+EXA_LINKS = 50
+EXA_CATEGORIES = {"news", "company", "publication", "personal site", "financial report", "people"}
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def exa_page_bound(*, fresh: bool) -> int:
+    return microusd(EXA_PAGE_CONTENT_USD + (EXA_LIVE_PAGE_MARGIN_USD if fresh else 0))
+
+
+def exa_bound(depth: str, results: int, fresh: bool, additional_queries: int) -> int:
+    """A conservative reservation for one search; the response estimate can only raise it."""
+    return microusd(
+        EXA_REQUEST_USD[depth]
+        + max(results - 10, 0) * EXA_EXTRA_RESULT_USD
+        + additional_queries * EXA_ADDITIONAL_QUERY_USD
+    ) + results * exa_page_bound(fresh=fresh)
+
+
+_DOMAIN = re.compile(r"^(\*\.)?([a-z0-9-]+\.)+[a-z]{2,}(/[A-Za-z0-9._~/-]*)?$")
+
+
+def public_domains(values) -> list[str]:
+    domains = [value.strip().lower() for value in values]
+    if len(domains) > 20 or any(not _DOMAIN.fullmatch(item) for item in domains):
+        raise ValueError("Use at most 20 public hostnames, optionally with a path or *. prefix.")
+    return domains
 
 
 def microusd(value) -> int:
@@ -405,29 +442,89 @@ class ExaResearch:
     def close(self) -> None:
         self.client.close()
 
-    def search(self, query: str, material_gap: str, *, num_results: int = 5) -> dict:
-        if type(num_results) is not int or not 1 <= num_results <= 10:
-            raise ValueError("Standard search permits 1-10 results within its fixed request bound.")
+    def search(
+        self,
+        query: str,
+        material_gap: str,
+        *,
+        num_results: int = 10,
+        depth: str = "auto",
+        additional_queries: tuple[str, ...] = (),
+        published_after: date | None = None,
+        published_before: date | None = None,
+        category: str | None = None,
+        include_domains: tuple[str, ...] = (),
+        exclude_domains: tuple[str, ...] = (),
+        fresh: bool = False,
+        content: str = "highlights",
+    ) -> dict:
+        """Search public sources. Highlights are query-focused excerpts; use text sparingly."""
+        if type(num_results) is not int or not 1 <= num_results <= EXA_MAX_RESULTS:
+            raise ValueError(f"Search permits 1-{EXA_MAX_RESULTS} results.")
+        if depth not in EXA_REQUEST_USD:
+            raise ValueError(f"Search depth must be one of {sorted(EXA_REQUEST_USD)}.")
+        if additional_queries and depth == "auto":
+            raise ValueError("Additional queries require deep-lite or deep search.")
+        if len(additional_queries) > EXA_ADDITIONAL_QUERIES:
+            raise ValueError(f"Use at most {EXA_ADDITIONAL_QUERIES} additional queries.")
+        if category is not None and category not in EXA_CATEGORIES:
+            raise ValueError(f"Category must be one of {sorted(EXA_CATEGORIES)}.")
+        dated = published_after is not None or published_before is not None
+        if dated and category in {"company", "people"}:
+            raise ValueError("Exa rejects publication dates for company and people searches.")
+        if published_after and published_before and published_after > published_before:
+            raise ValueError("The publication window must start before it ends.")
+        if content not in {"highlights", "text"}:
+            raise ValueError("Content must be highlights or text.")
         query = public_query(query, self.private_terms)
-        body = {
-            "query": query,
-            "type": "auto",
-            "numResults": num_results,
-            "contents": {"text": {"maxCharacters": 12_000}},
-        }
-        return self._request("/search", body, material_gap, SEARCH_BOUND_MICROUSD)
+        body = {"query": query, "type": depth, "numResults": num_results}
+        if additional_queries:
+            body["additionalQueries"] = [
+                public_query(item, self.private_terms) for item in additional_queries
+            ]
+        if category:
+            body["category"] = category
+        if published_after:
+            body["startPublishedDate"] = f"{published_after.isoformat()}T00:00:00.000Z"
+        if published_before:
+            body["endPublishedDate"] = f"{published_before.isoformat()}T23:59:59.999Z"
+        for name, domains in (
+            ("includeDomains", include_domains),
+            ("excludeDomains", exclude_domains),
+        ):
+            if domains:
+                body[name] = public_domains(domains)
+        body["contents"] = self._contents(content, query, fresh, links=0)
+        maximum = exa_bound(depth, num_results, fresh, len(additional_queries))
+        return self._request("/search", body, material_gap, maximum)
 
     def contents(self, source_id: str, material_gap: str) -> dict:
+        """Full text for a saved public result, fetched live."""
         source = self.evidence.source(self.context.owner, self.context.assessment_id, source_id)
-        if source.kind != "web" or source.provenance.get("provider") != "exa":
-            raise ValueError("Contents retrieval is limited to saved public Exa results.")
-        url = public_url(source.origin)
-        return self._request(
-            "/contents",
-            {"urls": [url], "text": {"maxCharacters": 12_000}},
-            material_gap,
-            CONTENTS_BOUND_MICROUSD,
+        if source.kind != "web":
+            raise ValueError("Contents retrieval is limited to saved public web sources.")
+        return self.fetch(source.origin, material_gap)
+
+    def fetch(self, url: str, material_gap: str, *, links: int = EXA_LINKS) -> dict:
+        """Fetch one admitted public URL live, saving its text and outgoing links."""
+        if type(links) is not int or not 0 <= links <= EXA_LINKS:
+            raise ValueError(f"Request between 0 and {EXA_LINKS} outgoing links.")
+        body = {"urls": [public_url(url)]} | self._contents("text", None, True, links)
+        return self._request("/contents", body, material_gap, exa_page_bound(fresh=True))
+
+    @staticmethod
+    def _contents(content: str, query: str | None, fresh: bool, links: int) -> dict:
+        contents = (
+            {"highlights": {"query": query, "maxCharacters": 4_000}}
+            if content == "highlights"
+            else {"text": {"maxCharacters": 12_000}}
         )
+        if fresh:
+            contents["maxAgeHours"] = 0
+            contents["livecrawlTimeout"] = 15_000
+        if links:
+            contents["extras"] = {"links": links}
+        return contents
 
     def _request(self, path: str, body: dict, material_gap: str, maximum: int) -> dict:
         if not material_gap.strip():
@@ -489,24 +586,34 @@ class ExaResearch:
                 ),
                 "response_estimate_usd": str(estimate) if estimate is not None else None,
                 "request_id": saved["request_id"],
-                "pricing_source": "https://docs.exa.ai/reference/pricing",
+                "pricing_source": "https://exa.ai/docs/reference/pricing",
             },
         )
-        source_ids = []
-        rejected = []
+        source_ids, found, rejected = [], [], []
         for index, item in enumerate(data["results"]):
             try:
                 url = public_url(item["url"])
             except (ValueError, KeyError):
                 rejected.append({"index": index, "reason": "Not an admissible public URL."})
                 continue
+            highlights = [part for part in item.get("highlights") or [] if isinstance(part, str)]
             text = (
                 item.get("text")
+                or "\n\n".join(highlights)
                 or "Title: " + str(item.get("title", "Unavailable")) + "\nURL: " + url
             )
             limitations = ["Original bytes are the Exa response, not a publisher HTML archive."]
-            if not item.get("text"):
+            if not item.get("text") and highlights:
+                limitations.append(
+                    "Query-focused highlights only; fetch the page for its full text."
+                )
+            elif not item.get("text"):
                 limitations.append("No page text was returned; only source metadata is available.")
+            links = [
+                link
+                for link in (item.get("extras") or {}).get("links") or []
+                if isinstance(link, str)
+            ][:EXA_LINKS]
             source = self.evidence.save_source(
                 context.owner,
                 context.assessment_id,
@@ -521,15 +628,28 @@ class ExaResearch:
                     "request_id": saved["request_id"],
                     "result_index": index,
                     "published_at": item.get("publishedDate"),
+                    "title": item.get("title"),
+                    "live_fetch": path == "/contents" or "maxAgeHours" in body.get("contents", {}),
+                    "links": links,
                     "public": True,
                 },
                 limitations=limitations,
                 retrieved_at=datetime.fromisoformat(saved["retrieved_at"]),
             )
             source_ids.append(source.id)
+            found.append(
+                {
+                    "source_id": source.id,
+                    "url": url,
+                    "title": item.get("title"),
+                    "published_at": item.get("publishedDate"),
+                    "outgoing_links": len(links),
+                }
+            )
         return {
             "operation_id": operation["id"],
             "source_ids": source_ids,
+            "results": found,
             "rejected_results": rejected,
             "provider_notices": data.get("notices", []),
             "cost_status": "pending",

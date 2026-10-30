@@ -20,6 +20,7 @@ from condere.runtime.providers import (
     JevDecisions,
     ProviderContext,
     accounted_model,
+    exa_bound,
     public_query,
     public_url,
 )
@@ -279,13 +280,24 @@ def test_exa_bounds_reuse_sources_and_keep_estimates_pending(provider_case):
             {
                 "query": "public technology alternatives",
                 "type": "auto",
-                "numResults": 5,
-                "contents": {"text": {"maxCharacters": 12_000}},
+                "numResults": 10,
+                "contents": {
+                    "highlights": {
+                        "query": "public technology alternatives",
+                        "maxCharacters": 4_000,
+                    }
+                },
             },
         ),
         (
             "/contents",
-            {"urls": ["https://example.com/fictional-evidence"], "text": {"maxCharacters": 12_000}},
+            {
+                "urls": ["https://example.com/fictional-evidence"],
+                "text": {"maxCharacters": 12_000},
+                "maxAgeHours": 0,
+                "livecrawlTimeout": 15_000,
+                "extras": {"links": 50},
+            },
         ),
     ]
     source = evidence.source(context.owner, context.assessment_id, result["source_ids"][0])
@@ -293,7 +305,8 @@ def test_exa_bounds_reuse_sources_and_keep_estimates_pending(provider_case):
     assert source.provenance["result_index"] == 0
     assert "not a publisher HTML" in source.limitations[0]
     spending = context.state.spending(context.owner, context.assessment_id)
-    assert spending["budget"]["pending_microusd"] == 8_000
+    # Ten pages of highlights on an auto search (17,000) plus one live page fetch (3,000).
+    assert spending["budget"]["pending_microusd"] == 20_000
     assert spending["budget"]["settled_microusd"] == 0
     assert all(item["actual_microusd"] is None for item in spending["operations"])
     assert (
@@ -366,7 +379,7 @@ def test_private_inputs_and_unbounded_searches_fail_before_http(provider_case):
         ):
             with pytest.raises(ValueError):
                 exa.search(query, "Missing information")
-        for count in (0, 11, True):
+        for count in (0, 26, True):
             with pytest.raises(ValueError):
                 exa.search("public alternatives", "Missing information", num_results=count)
         with pytest.raises(ValueError):
@@ -481,3 +494,58 @@ def test_jev_rejects_answers_to_other_questions(provider_case):
     jev = JevDecisions(context, "fake-router-key", transport=httpx.MockTransport(respond))
     with pytest.raises(ValueError, match="exactly the questions asked"):
         jev.ask(["Brief."], {"option": {"type": "choice", "instructions": "Which?"}}, "x")
+
+
+def test_exa_search_options_reach_the_request_and_raise_the_bound(provider_case):
+    from datetime import date
+
+    context, evidence = provider_case
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        result = research_response()["results"][0] | {
+            "text": None,
+            "highlights": ["Operators report upgrades breaking in 2026."],
+            "extras": {"links": ["https://example.com/follow-up", 7]},
+        }
+        return httpx.Response(200, json=research_response() | {"results": [result]})
+
+    exa = ExaResearch(context, evidence, "fake-exa-key", transport=httpx.MockTransport(respond))
+    try:
+        found = exa.search(
+            "vector extension upgrade pain",
+            "Need current operator complaints",
+            num_results=20,
+            depth="deep",
+            additional_queries=("sqlite vector upgrade failure",),
+            published_after=date(2026, 7, 1),
+            category="news",
+            include_domains=("reddit.com", "news.ycombinator.com"),
+            fresh=True,
+        )
+        for bad in (
+            {"category": "company", "published_after": date(2026, 1, 1)},
+            {"additional_queries": ("other phrasing",)},
+            {"include_domains": ("http://private",)},
+            {"depth": "unbounded"},
+        ):
+            with pytest.raises(ValueError):
+                exa.search("vector extension", "Need evidence", **bad)
+    finally:
+        exa.close()
+    [sent] = requests
+    assert sent["type"] == "deep" and sent["numResults"] == 20
+    assert sent["additionalQueries"] == ["sqlite vector upgrade failure"]
+    assert sent["startPublishedDate"] == "2026-07-01T00:00:00.000Z"
+    assert sent["category"] == "news"
+    assert sent["includeDomains"] == ["reddit.com", "news.ycombinator.com"]
+    assert sent["contents"]["maxAgeHours"] == 0
+    [operation] = operations(context)
+    assert operation["reserved_microusd"] == exa_bound("deep", 20, True, 1) == 89_000
+    assert found["results"][0]["published_at"] == "2026-10-01"
+    source = evidence.source(context.owner, context.assessment_id, found["source_ids"][0])
+    assert evidence.text(context.owner, context.assessment_id, source.id).startswith("Operators")
+    assert source.provenance["links"] == ["https://example.com/follow-up"]
+    assert source.provenance["live_fetch"] is True
+    assert any("highlights only" in item for item in source.limitations)

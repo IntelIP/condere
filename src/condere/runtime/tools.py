@@ -4,8 +4,10 @@ import base64
 import hashlib
 import json
 import re
+from datetime import date
 from functools import wraps
 from pathlib import Path, PurePosixPath
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -275,20 +277,84 @@ def worker_tools(
         return result
 
     @tool
-    def search_public(query: str, material_gap: str, num_results: int = 5) -> dict:
-        """Search a public topic when a material fact is missing from saved evidence."""
+    def search_public(
+        query: str,
+        material_gap: str,
+        num_results: int = 10,
+        depth: Literal["auto", "deep-lite", "deep"] = "auto",
+        additional_queries: list[str] | None = None,
+        published_after: date | None = None,
+        published_before: date | None = None,
+        category: Literal[
+            "news", "company", "publication", "personal site", "financial report", "people"
+        ]
+        | None = None,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+        fresh: bool = False,
+        content: Literal["highlights", "text"] = "highlights",
+    ) -> dict:
+        """Search public sources when a material fact is missing from saved evidence.
+
+        For anything time-sensitive (launches, pricing, funding, adoption, complaints),
+        set published_after and use fresh=True so pages are fetched live, not from cache.
+        Route by question: include_domains such as reddit.com, news.ycombinator.com or x.com
+        for user pain and workarounds, github.com for adoption, g2.com for buyer complaints;
+        category "news" for launches and funding, "company" for vendors. Use depth
+        "deep-lite" or "deep" with additional_queries (other phrasings) for broad questions.
+        Results return query-focused highlights with title, URL and publication date; call
+        fetch_public_url for a page's full text and outgoing links.
+        """
         guard("search_public")
         if research is None:
             raise Conflict("Public research is not configured for this worker.")
-        return research.search(query, material_gap, num_results=num_results)
+        return research.search(
+            query,
+            material_gap,
+            num_results=num_results,
+            depth=depth,
+            additional_queries=tuple(additional_queries or ()),
+            published_after=published_after,
+            published_before=published_before,
+            category=category,
+            include_domains=tuple(include_domains or ()),
+            exclude_domains=tuple(exclude_domains or ()),
+            fresh=fresh,
+            content=content,
+        )
 
     @tool
     def fetch_public_source(source_id: str, material_gap: str) -> dict:
-        """Purchase bounded text retrieval for a previously saved public Exa result if needed."""
+        """Fetch the live full text and outgoing links of a saved public web source."""
         guard("fetch_public_source")
         if research is None:
             raise Conflict("Public research is not configured for this worker.")
         return research.contents(source_id, material_gap)
+
+    @tool
+    def fetch_public_url(url: str, material_gap: str) -> dict:
+        """Fetch a public page live: one from the brief, a saved source, or a saved link.
+
+        Follow links one hop from strong sources. Each saved source lists its outgoing
+        links; any of those, or any URL in the brief, may be fetched.
+        """
+        guard("fetch_public_url")
+        if research is None:
+            raise Conflict("Public research is not configured for this worker.")
+        admitted = {
+            str(item)
+            for item in state.get(owner, assessment_id)["brief"].get("public_references", [])
+        }
+        for record in state.records(owner, assessment_id, kind="source"):
+            source = SourceDocument.model_validate(record["payload"])
+            if source.kind == "web":
+                admitted.add(source.origin)
+                admitted.update(source.provenance.get("links") or [])
+        if url not in admitted:
+            raise ValueError(
+                "Fetch only URLs from the brief, saved sources, or their saved outgoing links."
+            )
+        return research.fetch(url, material_gap)
 
     @tool
     def inspect_repository(
@@ -497,6 +563,7 @@ def worker_tools(
         calculate,
         search_public,
         fetch_public_source,
+        fetch_public_url,
         inspect_repository,
         submit_question,
         submit_review,

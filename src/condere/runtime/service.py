@@ -38,10 +38,10 @@ READ_TOOLS = [
     "calculate",
 ]
 RESEARCH_TOOLS = {
-    "screen": ["search_public", "fetch_public_source", "inspect_repository"],
-    "technical": ["search_public", "fetch_public_source", "inspect_repository"],
-    "market": ["search_public", "fetch_public_source"],
-    "business": ["search_public", "fetch_public_source"],
+    "screen": ["search_public", "fetch_public_source", "fetch_public_url", "inspect_repository"],
+    "technical": ["search_public", "fetch_public_source", "fetch_public_url", "inspect_repository"],
+    "market": ["search_public", "fetch_public_source", "fetch_public_url"],
+    "business": ["search_public", "fetch_public_source", "fetch_public_url"],
     "review": [],
 }
 SUBMIT_TOOL = {"screen": "submit_screen", "review": "submit_review"}

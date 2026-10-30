@@ -271,3 +271,20 @@ def test_repository_inspection_pins_commit_and_rejects_changed_guest_files(
     discovered_result = tools["inspect_repository"].invoke(request | {"repository_url": discovered})
     assert discovered_result["inspection"]["repository_url"] == discovered
     assert len(service.state.records(owner, case["id"], kind="repository_admission")) == 2
+
+
+def test_fetch_public_url_admits_only_brief_saved_or_linked_pages(tool_case):
+    service, owner, case, build, requests = tool_case
+    tools, _, _ = build("market", "M1")
+    tools["search_public"].invoke(
+        {"query": "public technology alternatives", "material_gap": "Missing comparator"}
+    )
+    refused = tools["fetch_public_url"].invoke(
+        {"url": "https://example.org/not-admitted", "material_gap": "Need the page"}
+    )
+    assert isinstance(refused, str) and "saved outgoing links" in refused
+    assert len(requests) == 1
+    fetched = tools["fetch_public_url"].invoke(
+        {"url": "https://example.com/fictional-evidence", "material_gap": "Need full text"}
+    )
+    assert fetched["source_ids"] and len(requests) == 2
