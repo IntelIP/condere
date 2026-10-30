@@ -28,6 +28,9 @@ Route = Literal[
     "managed_service",
     "dual_license",
     "services_only",
+    # Owner direction 2026-10-30: sell the outcome, delivered by agents operating the service
+    # (an agent-run insurer rather than AI software for insurers), not the software itself.
+    "ai_native_service",
     "none",
 ]
 # Owner direction 2026-10-30: guidance is pursue or stop. Uncertainty belongs in the next test,
@@ -100,7 +103,9 @@ class Component(Record):
 
 class Asset(Record):
     summary: Text
-    ownership: Literal["owned", "third_party_oss", "mixed", "unknown"]
+    # `none`: no existing software, model or dataset; the product is new, inspired by the
+    # input, and its IP must be created (owner direction 2026-10-30).
+    ownership: Literal["owned", "third_party_oss", "mixed", "none", "unknown"]
     repositories: list[Repository] = Field(default_factory=list)
     components: list[Component] = Field(default_factory=list)
     hard_to_replicate: list[ClaimId] = Field(default_factory=list)

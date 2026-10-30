@@ -20,9 +20,13 @@ One `Analysis`, submitted with `submit_analysis`. Its exact schema is in
   and reported claims must cite an exact quote from a saved source; unknown claims
   cite nothing.
 - `asset`, `rights`, `buyer`: what the IP is, whether it can be spun off, and who
-  pays — each with a short summary and claim IDs.
+  pays — each with a short summary and claim IDs. When the input points to no
+  existing software, model or dataset, set `asset.ownership` to `none` and say the
+  product is new: the agent still reasons to a product, but the IP must be created.
 - `options`: two to four different spin-off routes, each with the open part, the
   paid part, the buyer, why they pay, the main risk, and the case for and against.
+  Where the capability can deliver an outcome customers already buy, include an
+  `ai_native_service` option (agents deliver the outcome; see `open-core-boundary`).
 - `thesis`: one sentence that commits to the best spin-off bet, naming who pays
   (a specific buyer, not "teams" or "developers"), for what (the paid capability,
   not the open code), and why they would pay now (the trigger or pain). It is a

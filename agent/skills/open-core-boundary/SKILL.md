@@ -7,7 +7,18 @@ description: "Propose two to four spin-off options and, for each, where the line
 
 Write two to four genuinely different `options`. Routes: `open_source_owned_ip`,
 `open_core_on_existing_oss`, `managed_service`, `dual_license`, `services_only`,
-`none`. Include doing nothing or a narrower route when evidence favours it.
+`ai_native_service`, `none`. Include doing nothing or a narrower route when evidence
+favours it.
+
+`ai_native_service` sells the outcome, not the software: agents do the work a
+customer already pays people or firms to do (an agent-run insurer, claims desk or
+compliance review, rather than AI software sold to insurers). Consider it whenever the
+capability can deliver an outcome customers already buy. For it, state the outcome
+sold and what customers pay for it today, which steps agents perform and where a
+human must review or sign, the licences, liability or regulation that apply, and the
+margin per outcome after model, tooling and review costs. The open part, if any, is
+tooling or method; the paid part is the delivered outcome. `services_only` is a
+people-delivered service.
 
 For each option state the open part, the paid part, the buyer, why they pay,
 the main risk, and the case for and against, each backed by claim IDs.
