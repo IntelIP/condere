@@ -14,7 +14,10 @@ Read each source with `read_source` or `search_saved_sources`. For each fact
 that bears on the question, write a claim: a one-sentence statement, a status
 (`reported` when the source states it, `observed` only for a primary record such
 as a price page or a firsthand account of the author's own experience), the
-source's publication date, and a citation with the exact quoted text. Save claims
+source's publication date, and a citation with the exact quoted text that states
+the fact on its own: one fact per claim, every number and qualifier in the
+statement visible in the quotes (cite several passages if needed), otherwise
+narrow the statement. Save claims
 with `submit_claims` (origin `extractor`) as soon as you have a few, so nothing is
 lost; fix and resubmit any it rejects. Search results already contain
 query-focused highlights: when a highlight states the fact, cite it directly. End

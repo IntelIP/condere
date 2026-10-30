@@ -545,8 +545,12 @@ def worker_tools(
         """Save verified claims as soon as you find them; returns an ID for each.
 
         Each claim needs a statement, a status and, when observed or reported, a citation
-        with source_id and the exact quoted text. Rejected claims return the reason; fix
-        and resubmit them. The lead includes a saved claim in its analysis by ID.
+        with source_id and the exact quoted text. State one fact per claim, and quote text
+        that states that fact on its own: a reader shown only the quotes must agree with the
+        whole statement. Cite each passage a fact needs; otherwise narrow the statement to
+        what the quotes say and save the rest separately (an inference is `modelled`).
+        Rejected claims return the reason; fix and resubmit them. The lead includes a saved
+        claim in its analysis by ID.
         """
         guard("submit_claims")
         return service.submit_claims(
