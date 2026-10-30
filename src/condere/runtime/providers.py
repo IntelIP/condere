@@ -26,13 +26,57 @@ from condere.runtime.evidence import EvidenceStore
 from condere.runtime.operations import ProviderResult, execute_once
 from condere.runtime.state import AssessmentStore, Conflict, content_hash
 
-MODEL_ID = "openai/gpt-6.1-sol"
-MODEL_CONTEXT_TOKENS = 1_050_000
-MODEL_OUTPUT_TOKENS = 8_192
-# Conservative long-context bounds, including the published cache-write premium.
-# OpenRouter's model/endpoint catalogs checked 2026-10-22; these are not invoices.
-PROMPT_USD_PER_TOKEN = Decimal("0.000005")
-OUTPUT_USD_PER_TOKEN = Decimal("0.000015")
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """One OpenRouter model with the bounds that support its maximum reservation."""
+
+    id: str
+    provider: str
+    context_tokens: int
+    output_tokens: int
+    # Conservative per-token bounds, including any published cache-write premium.
+    prompt_usd_per_token: Decimal
+    output_usd_per_token: Decimal
+    # OpenRouter max_price, in USD per million tokens, so routing cannot exceed the bound.
+    max_price: dict
+
+
+# OpenRouter's model/endpoint catalogs checked 2026-10-22 (GPT) and 2026-10-30 (Claude);
+# these are request bounds, not invoices. Claude was verified live through the Responses
+# API with tool calls, reasoning effort and encrypted reasoning on 2026-10-30.
+GPT_SOL = ModelSpec(
+    "openai/gpt-6.1-sol",
+    "openai",
+    1_050_000,
+    8_192,
+    Decimal("0.000005"),
+    Decimal("0.000015"),
+    {"prompt": 4, "completion": 15},
+)
+CLAUDE_OPUS = ModelSpec(
+    "anthropic/claude-opus-5.5",
+    "anthropic",
+    1_000_000,
+    16_384,
+    Decimal("0.000005"),
+    Decimal("0.00002"),
+    {"prompt": 4, "completion": 20},
+)
+CLAUDE_HAIKU = ModelSpec(
+    "anthropic/claude-haiku-5.5",
+    "anthropic",
+    1_000_000,
+    8_192,
+    Decimal("0.000000125"),
+    Decimal("0.0000005"),
+    {"prompt": 0.1, "completion": 0.5},
+)
+MODEL_ID = GPT_SOL.id
+MODEL_CONTEXT_TOKENS = GPT_SOL.context_tokens
+MODEL_OUTPUT_TOKENS = GPT_SOL.output_tokens
+PROMPT_USD_PER_TOKEN = GPT_SOL.prompt_usd_per_token
+OUTPUT_USD_PER_TOKEN = GPT_SOL.output_usd_per_token
 SEARCH_BOUND_MICROUSD = 7_000  # auto search, <=10 results, text only; 2026-10-21 docs.
 CONTENTS_BOUND_MICROUSD = 1_000  # one URL, text only; 2026-10-21 docs.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -82,18 +126,19 @@ def _decode_result(value: dict) -> ChatResult:
 
 class AccountedChatOpenAI(ChatOpenAI):
     _context: ProviderContext = PrivateAttr()
+    _spec: ModelSpec = PrivateAttr(default=GPT_SOL)
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         for name in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
             if name in kwargs and (
-                type(kwargs[name]) is not int or not 1 <= kwargs[name] <= MODEL_OUTPUT_TOKENS
+                type(kwargs[name]) is not int or not 1 <= kwargs[name] <= self._spec.output_tokens
             ):
                 raise ValueError("The model request must preserve its admitted output-token cap.")
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         cap = payload.get("max_output_tokens")
-        if type(cap) is not int or cap < 1 or cap > MODEL_OUTPUT_TOKENS:
+        if type(cap) is not int or cap < 1 or cap > self._spec.output_tokens:
             raise ValueError("The model request must preserve its admitted output-token cap.")
         permitted = {
             "model",
@@ -110,13 +155,13 @@ class AccountedChatOpenAI(ChatOpenAI):
         }
         if (
             set(payload) - permitted
-            or payload["model"] != MODEL_ID
+            or payload["model"] != self._spec.id
             or payload.get("stream") is not False
             or payload.get("store") is not False
             or payload.get("include", []) != ["reasoning.encrypted_content"]
         ):
             raise ValueError("The model request includes an unbounded or unapproved option.")
-        if payload.get("extra_body") != router_options():
+        if payload.get("extra_body") != router_options(self._spec):
             raise ValueError(
                 "Provider routing, pricing, and plugin restrictions cannot be overridden."
             )
@@ -152,9 +197,10 @@ class AccountedChatOpenAI(ChatOpenAI):
         context = self._context
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
         key = "model:" + context.worker_role + ":" + content_hash(payload)
+        spec = self._spec
         maximum = microusd(
-            MODEL_CONTEXT_TOKENS * PROMPT_USD_PER_TOKEN
-            + payload["max_output_tokens"] * OUTPUT_USD_PER_TOKEN
+            spec.context_tokens * spec.prompt_usd_per_token
+            + payload["max_output_tokens"] * spec.output_usd_per_token
         )
         called = False
 
@@ -168,7 +214,7 @@ class AccountedChatOpenAI(ChatOpenAI):
             # LangChain's Responses conversion drops provider-specific cost fields.
             # Preserve the raw SDK usage before conversion for the spending ledger.
             usage = response.usage.model_dump(exclude_none=True) if response.usage else {}
-            result.llm_output = {"token_usage": usage, "model_name": MODEL_ID}
+            result.llm_output = {"token_usage": usage, "model_name": spec.id}
             cost = usage.get("cost")
             known = cost is not None and not usage.get("is_byok", False)
             basis = (
@@ -176,7 +222,7 @@ class AccountedChatOpenAI(ChatOpenAI):
                     "basis": "OpenRouter reported usage cost; not an invoice",
                     "reported_usd": str(cost),
                     "rounding": "ceiling to integer microdollars",
-                    "model": MODEL_ID,
+                    "model": spec.id,
                 }
                 if known
                 else None
@@ -198,7 +244,7 @@ class AccountedChatOpenAI(ChatOpenAI):
             max_microusd=maximum,
             dispatch_identity={
                 "provider": "openrouter",
-                "model": MODEL_ID,
+                "model": spec.id,
                 "local_request_key": key,
             },
             invoke=invoke,
@@ -236,14 +282,14 @@ class AccountedChatOpenAI(ChatOpenAI):
         return await asyncio.to_thread(self._generate, messages, stop, manager, **kwargs)
 
 
-def router_options() -> dict:
+def router_options(spec: ModelSpec = GPT_SOL) -> dict:
     return {
         "provider": {
-            "order": ["openai"],
-            "only": ["openai"],
+            "order": [spec.provider],
+            "only": [spec.provider],
             "allow_fallbacks": False,
             "require_parameters": True,
-            "max_price": {"prompt": 4, "completion": 15, "image": 0, "request": 0},
+            "max_price": spec.max_price | {"image": 0, "request": 0},
         },
         "reasoning": {"effort": "medium"},
         "plugins": [],
@@ -251,15 +297,15 @@ def router_options() -> dict:
 
 
 def accounted_model(
-    context: ProviderContext, api_key: str, *, http_client=None
+    context: ProviderContext, api_key: str, *, spec: ModelSpec = GPT_SOL, http_client=None
 ) -> AccountedChatOpenAI:
     if not api_key:
         raise ValueError("A scoped OpenRouter key is required.")
     model = AccountedChatOpenAI(
-        model=MODEL_ID,
+        model=spec.id,
         api_key=api_key,
         base_url="https://openrouter.ai/api/v1",
-        max_tokens=MODEL_OUTPUT_TOKENS,
+        max_tokens=spec.output_tokens,
         max_retries=0,
         timeout=300,
         disable_streaming=True,
@@ -267,10 +313,10 @@ def accounted_model(
         use_responses_api=True,
         store=False,
         include=["reasoning.encrypted_content"],
-        extra_body=router_options(),
+        extra_body=router_options(spec),
         profile={
             "max_input_tokens": 48_000,
-            "max_output_tokens": MODEL_OUTPUT_TOKENS,
+            "max_output_tokens": spec.output_tokens,
             "tool_calling": True,
             "structured_output": True,
             "image_inputs": True,
@@ -278,6 +324,7 @@ def accounted_model(
         http_client=http_client,
     )
     model._context = context
+    model._spec = spec
     return model
 
 
@@ -489,3 +536,98 @@ class ExaResearch:
             "provider_estimate_usd": str(estimate) if estimate is not None else None,
             "reserved_microusd": bound,
         }
+
+
+JEV_MODEL = "typesafe/jev-1.14"
+JEV_PROMPT_USD_PER_TOKEN = Decimal("0.000000042")  # output is free; OpenRouter 2026-10-30.
+# Jev's long-context mode (slower, less accurate) starts near 32,000 bytes of text.
+JEV_STATE_BYTES = 32_000
+JEV_REQUEST_BYTES = 64_000
+JEV_QUESTIONS = 32
+# Jev bills its own prompt overhead: live requests of a few hundred bytes billed 284
+# tokens for one question and 441 for three (2026-10-30). Bound it generously.
+JEV_OVERHEAD_TOKENS = 1_000
+JEV_TOKENS_PER_QUESTION = 200
+
+
+class JevDecisions:
+    """Typed decisions from Jev through OpenRouter's System One endpoint.
+
+    Jev returns probabilities, never prose. Callers combine answers in code.
+    """
+
+    def __init__(self, context: ProviderContext, api_key: str, *, transport=None):
+        if not api_key:
+            raise ValueError("A scoped OpenRouter key is required.")
+        self.context = context
+        self.client = httpx.Client(
+            base_url="https://openrouter.ai/api/v1",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=60,
+            follow_redirects=False,
+            transport=transport,
+        )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def ask(self, state: list[str], questions: dict, purpose: str) -> dict:
+        if not purpose.strip():
+            raise ValueError("Name the decision these questions serve.")
+        if not state or any(not isinstance(item, str) or not item.strip() for item in state):
+            raise ValueError("Jev state must be nonempty text.")
+        if len(questions) == 0 or len(questions) > JEV_QUESTIONS:
+            raise ValueError(f"Ask between 1 and {JEV_QUESTIONS} questions per request.")
+        if sum(len(item.encode()) for item in state) > JEV_STATE_BYTES:
+            raise ValueError("The decision state must stay under 32,000 bytes.")
+        for name, question in questions.items():
+            if question.get("type") not in {"choice", "score", "noul"}:
+                raise ValueError(f"Question {name} must be a choice, score or noul question.")
+        body = {"model": JEV_MODEL, "state": state, "questions": questions}
+        size = len(json.dumps(body).encode())
+        if size > JEV_REQUEST_BYTES:
+            raise ValueError("The decision request exceeds its admitted size.")
+        context = self.context
+        key = "jev:" + content_hash(body)
+        # A token is at least one byte, so the request size bounds the supplied tokens;
+        # Jev's own prompt overhead is added on top.
+        tokens = size + JEV_OVERHEAD_TOKENS + JEV_TOKENS_PER_QUESTION * len(questions)
+        maximum = microusd(tokens * JEV_PROMPT_USD_PER_TOKEN)
+
+        def invoke():
+            response = self.client.post("/systemone", json=body)
+            response.raise_for_status()
+            data = response.json()
+            answers = data.get("answers")
+            if not isinstance(answers, dict) or set(answers) != set(questions):
+                raise ValueError("Jev did not answer exactly the questions asked.")
+            cost = (data.get("usage") or {}).get("cost")
+            return ProviderResult(
+                {"model": data.get("model"), "answers": answers, "usage": data.get("usage")},
+                actual_microusd=microusd(cost) if cost is not None else None,
+                cost_basis=(
+                    {
+                        "basis": "OpenRouter reported usage cost; not an invoice",
+                        "reported_usd": str(cost),
+                        "model": data.get("model"),
+                    }
+                    if cost is not None
+                    else None
+                ),
+            )
+
+        operation = execute_once(
+            context.state,
+            owner=context.owner,
+            assessment_id=context.assessment_id,
+            generation=context.generation,
+            key=key,
+            kind="jev",
+            request=body,
+            max_microusd=maximum,
+            dispatch_identity={"provider": "openrouter", "model": JEV_MODEL, "purpose": purpose},
+            invoke=invoke,
+        )
+        if operation["state"] != "succeeded":
+            raise Conflict("The saved decision operation failed; it will not be repeated.")
+        return operation["result"] | {"operation_id": operation["id"]}

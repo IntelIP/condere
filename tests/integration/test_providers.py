@@ -12,9 +12,12 @@ from test_evidence import SimulatedObjects
 
 from condere.runtime.evidence import EvidenceError, EvidenceStore
 from condere.runtime.providers import (
+    CLAUDE_HAIKU,
+    CLAUDE_OPUS,
     MODEL_ID,
     MODEL_OUTPUT_TOKENS,
     ExaResearch,
+    JevDecisions,
     ProviderContext,
     accounted_model,
     public_query,
@@ -396,3 +399,85 @@ def test_external_images_and_native_file_inputs_fail_before_model_dispatch(provi
             with pytest.raises(ValueError):
                 model.invoke([{"role": "user", "content": [block]}])
     assert operations(context) == []
+
+
+def test_claude_specs_route_only_to_anthropic_within_their_price_bounds(provider_case):
+    context, _ = provider_case
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=completion() | {"model": CLAUDE_HAIKU.id})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        for spec in (CLAUDE_OPUS, CLAUDE_HAIKU):
+            accounted_model(context, "fake-router-key", spec=spec, http_client=client).invoke(
+                "Summarize the saved source."
+            )
+        with pytest.raises(ValueError, match="output-token cap"):
+            accounted_model(
+                context, "fake-router-key", spec=CLAUDE_HAIKU, http_client=client
+            ).invoke("Too long.", max_output_tokens=CLAUDE_HAIKU.output_tokens + 1)
+    opus, haiku = requests
+    assert opus["model"] == CLAUDE_OPUS.id and haiku["model"] == CLAUDE_HAIKU.id
+    assert opus["max_output_tokens"] == CLAUDE_OPUS.output_tokens
+    assert opus["provider"]["only"] == ["anthropic"]
+    assert opus["provider"]["max_price"] == {
+        "prompt": 4,
+        "completion": 20,
+        "image": 0,
+        "request": 0,
+    }
+    assert haiku["provider"]["max_price"]["completion"] == 0.5
+    reserved = sorted(item["reserved_microusd"] for item in operations(context))
+    # Haiku's full-context bound is far below Opus's; each is reserved before dispatch.
+    assert reserved[0] < 200_000 < 5_000_000 < reserved[1]
+
+
+def jev_answer(questions):
+    return {
+        "model": "typesafe/jev-1.14-20261014",
+        "answers": {
+            name: {"type": "choice", "choice": "O1", "probabilities": {"O1": 1}, "confidence": 1}
+            for name in questions
+        },
+        "usage": {"input_tokens": 400, "output_tokens": 20, "cost": 0.0000168},
+    }
+
+
+def test_jev_answers_once_per_request_and_records_its_reported_cost(provider_case):
+    context, _ = provider_case
+    requests = []
+    questions = {"option": {"type": "choice", "instructions": "Which?", "criteria": {"O1": "a"}}}
+
+    def respond(request):
+        assert request.url == "https://openrouter.ai/api/v1/systemone"
+        assert request.headers["authorization"] == "Bearer fake-router-key"
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=jev_answer(requests[-1]["questions"]))
+
+    jev = JevDecisions(context, "fake-router-key", transport=httpx.MockTransport(respond))
+    first = jev.ask(["Fictional brief."], questions, "choose option")
+    again = jev.ask(["Fictional brief."], questions, "choose option")
+    assert len(requests) == 1 and requests[0]["model"] == "typesafe/jev-1.14"
+    assert first["answers"]["option"]["choice"] == "O1"
+    assert again["operation_id"] == first["operation_id"]
+    [operation] = operations(context)
+    assert operation["kind"] == "jev" and operation["actual_microusd"] == 17
+    # The bound covers Jev's billed prompt overhead, which exceeded a bytes-only bound live.
+    assert operation["reserved_microusd"] >= operation["actual_microusd"]
+    with pytest.raises(ValueError, match="under 32,000 bytes"):
+        jev.ask(["x" * 32_001], questions, "choose option")
+    with pytest.raises(ValueError, match="choice, score or noul"):
+        jev.ask(["Brief."], {"box": {"type": "box", "instructions": "x"}}, "choose option")
+
+
+def test_jev_rejects_answers_to_other_questions(provider_case):
+    context, _ = provider_case
+
+    def respond(request):
+        return httpx.Response(200, json=jev_answer({"other": {}}))
+
+    jev = JevDecisions(context, "fake-router-key", transport=httpx.MockTransport(respond))
+    with pytest.raises(ValueError, match="exactly the questions asked"):
+        jev.ask(["Brief."], {"option": {"type": "choice", "instructions": "Which?"}}, "x")
