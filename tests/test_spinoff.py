@@ -151,35 +151,33 @@ def test_a_failed_gate_moves_the_choice_and_records_the_adjustment():
     result = apply_decision_rules(Analysis.model_validate(analysis()), decision(gates=gates))
     assert result.option.value == "O2"
     assert result.route.value == "services_only"
-    # O2 rests only on a modelled claim, so pursuing it is not yet supported.
-    assert result.verdict.value == "insufficient_evidence"
+    # O2 rests only on a modelled claim, so the guidance is not to pursue it.
+    assert result.verdict.value == "stop"
     assert [item.field for item in result.adjustments] == ["option", "route", "verdict"]
 
 
 def test_pursue_needs_evaluated_gates_and_evidenced_claims():
     unevaluated = apply_decision_rules(Analysis.model_validate(analysis()), decision(gates=[]))
-    assert unevaluated.verdict.value == "insufficient_evidence"
+    # Guidance is pursue or stop; an unresolved gate becomes part of what the next test settles.
+    assert unevaluated.verdict.value == "pursue"
+    assert any("unresolved hard gate" in item for item in unevaluated.contested)
     supported = apply_decision_rules(Analysis.model_validate(analysis()), decision())
     assert supported.verdict.value == "pursue"
     assert supported.adjustments == []
 
 
-def test_stop_needs_a_failed_gate_or_weak_pain_everywhere():
-    reshaped = apply_decision_rules(Analysis.model_validate(analysis()), decision(verdict="stop"))
-    assert reshaped.verdict.value == "reshape"
-    weak = [
-        {
-            "option": key,
-            "criterion": "buyer_pain",
-            "value": "weak",
-            "distribution": {"strong": 0.0, "moderate": 0.1, "weak": 0.8, "unknown": 0.1},
-        }
-        for key in ("O1", "O2")
-    ]
-    kept = apply_decision_rules(
-        Analysis.model_validate(analysis()), decision(verdict="stop", ratings=weak)
-    )
-    assert kept.verdict.value == "stop"
+def test_guidance_is_pursue_or_stop_and_old_results_stay_readable():
+    stopped = apply_decision_rules(Analysis.model_validate(analysis()), decision(verdict="stop"))
+    assert stopped.verdict.value == "stop" and stopped.adjustments == []
+    no_option = apply_decision_rules(Analysis.model_validate(analysis()), decision(chosen="none"))
+    assert no_option.verdict.value == "stop"
+    retired = decision().model_dump(mode="json")
+    retired["verdict"] = {
+        "value": "reshape",
+        "distribution": {"pursue": 0.2, "reshape": 0.5, "stop": 0.1, "insufficient_evidence": 0.2},
+        "confidence": 0.6,
+    }
+    assert Decision.model_validate(retired).verdict.value == "reshape"  # Published before.
 
 
 def test_even_answers_are_reported_as_contested():

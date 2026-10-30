@@ -30,7 +30,11 @@ Route = Literal[
     "services_only",
     "none",
 ]
-Verdict = Literal["pursue", "reshape", "stop", "insufficient_evidence"]
+# Owner direction 2026-10-30: guidance is pursue or stop. Uncertainty belongs in the next test,
+# the contested list and the open questions, not in a third verdict. Results published before
+# then may carry the retired values and stay readable.
+Verdict = Literal["pursue", "stop"]
+RETIRED_VERDICTS = {"reshape", "insufficient_evidence"}
 Gate = Literal["rights_clear", "asset_works"]
 Criterion = Literal[
     "buyer_pain",
@@ -312,7 +316,7 @@ class Decision(Record):
 
     @model_validator(mode="after")
     def known_values(self) -> Self:
-        if self.verdict.value not in Verdict.__args__:
+        if self.verdict.value not in {*Verdict.__args__, *RETIRED_VERDICTS}:
             raise ValueError("Unknown verdict.")
         if self.route.value not in Route.__args__:
             raise ValueError("Unknown route.")
@@ -369,37 +373,21 @@ def apply_decision_rules(analysis: Analysis, decision: Decision) -> Decision:
     chosen = options.get(option.value)
     if chosen is not None and route.value != chosen.route:
         route = adjust("route", route, chosen.route, "The route follows the chosen option.")
-    if verdict.value == "pursue":
-        if chosen is None or unknown(chosen.id):
-            verdict = adjust(
-                "verdict",
-                verdict,
-                "insufficient_evidence",
-                "Pursuing requires every hard gate of the chosen option to be evaluated.",
-            )
-        elif not any(analysis.claim(claim).status in EVIDENCED for claim in chosen.claims):
-            verdict = adjust(
-                "verdict",
-                verdict,
-                "insufficient_evidence",
-                "Pursuing requires at least one observed or reported claim behind the option.",
-            )
-    if verdict.value == "stop":
-        weak_pain = all(
-            any(
-                rating.option == key and rating.criterion == "buyer_pain" and rating.value == "weak"
-                for rating in decision.ratings
-            )
-            for key in options
+    if verdict.value == "pursue" and chosen is None:
+        verdict = adjust("verdict", verdict, "stop", "Pursuing needs a chosen option.")
+    if verdict.value == "pursue" and not any(
+        analysis.claim(claim).status in EVIDENCED for claim in chosen.claims
+    ):
+        verdict = adjust(
+            "verdict",
+            verdict,
+            "stop",
+            "No observed or reported claim supports the chosen option.",
         )
-        if not any(failed(key) for key in options) and not weak_pain:
-            verdict = adjust(
-                "verdict",
-                verdict,
-                "reshape",
-                "Stopping requires a failed gate or weak buyer pain across every option.",
-            )
     contested = list(decision.contested)
+    if verdict.value == "pursue" and unknown(chosen.id):
+        # Pursuing means running the next test; an unresolved gate is part of what it tests.
+        contested.append(f"{chosen.id} has an unresolved hard gate; the next test must settle it")
     for name, value in (("verdict", verdict), ("route", route), ("option", option)):
         if value.contested() and name not in contested:
             contested.append(name)

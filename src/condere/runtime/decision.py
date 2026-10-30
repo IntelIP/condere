@@ -42,12 +42,10 @@ RATING_CRITERIA = {
     "unknown": "The brief has no evidence either way.",
 }
 VERDICTS = {
-    "pursue": "Evidence supports pursuing the best option with its next test.",
-    "reshape": "There is something here, but the option needs a different buyer, boundary "
-    "or route first.",
-    "stop": "Rights block every option, or buyers show no pain worth paying to remove.",
-    "insufficient_evidence": "The brief lacks the evidence needed to judge; more research is "
-    "needed first.",
+    "pursue": "Pursue the best option by running its next test: the evidence leaves a credible "
+    "buyer with a problem worth paying to solve, and nothing in the brief rules the option out.",
+    "stop": "Do not pursue: rights or the software rule out every option, or the evidence shows "
+    "buyers lack pain worth paying to remove.",
 }
 
 

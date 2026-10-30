@@ -55,15 +55,15 @@ def test_decide_asks_per_option_then_overall_and_links_the_exact_brief():
     assert "C1 [observed]" in brief and "Case against" in brief
 
 
-def test_uncertain_gate_answers_block_a_pursue_verdict():
+def test_an_uncertain_gate_is_contested_not_a_third_verdict():
     jev = ScriptedJev({"O1": {"rights_clear": 0.5}, "O2": {}})
     decision, _ = decide(jev, Analysis.model_validate(analysis()), "Assess it.", ASSESSMENT)
     gate = next(
         item for item in decision.gates if item.option == "O1" and item.gate == "rights_clear"
     )
     assert gate.result == "unknown"
-    assert decision.verdict.value == "insufficient_evidence"
-    assert any(item.field == "verdict" for item in decision.adjustments)
+    assert decision.verdict.value in {"pursue", "stop"}
+    assert any("unresolved hard gate" in item for item in decision.contested)
 
 
 def test_failed_gate_moves_the_choice():
