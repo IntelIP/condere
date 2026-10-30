@@ -40,6 +40,9 @@ class ModelSpec:
     output_usd_per_token: Decimal
     # OpenRouter max_price, in USD per million tokens, so routing cannot exceed the bound.
     max_price: dict
+    # OpenRouter's Anthropic endpoints accept only tool_choice "auto" on the Responses API
+    # (live probe 2026-10-30: "required" and a named function return 404 "No endpoints").
+    forced_tool_choice: bool = True
 
 
 # OpenRouter's model/endpoint catalogs checked 2026-10-22 (GPT) and 2026-10-30 (Claude);
@@ -62,6 +65,7 @@ CLAUDE_OPUS = ModelSpec(
     Decimal("0.000005"),
     Decimal("0.00002"),
     {"prompt": 4, "completion": 20},
+    forced_tool_choice=False,
 )
 CLAUDE_HAIKU = ModelSpec(
     "anthropic/claude-haiku-5.5",
@@ -71,6 +75,7 @@ CLAUDE_HAIKU = ModelSpec(
     Decimal("0.000000125"),
     Decimal("0.0000005"),
     {"prompt": 0.1, "completion": 0.5},
+    forced_tool_choice=False,
 )
 MODEL_ID = GPT_SOL.id
 MODEL_CONTEXT_TOKENS = GPT_SOL.context_tokens
@@ -174,6 +179,9 @@ class AccountedChatOpenAI(ChatOpenAI):
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if not self._spec.forced_tool_choice and payload.get("tool_choice") not in (None, "auto"):
+            # Structured output still arrives as a tool call; the subagent prompt asks for it.
+            payload["tool_choice"] = "auto"
         cap = payload.get("max_output_tokens")
         if type(cap) is not int or cap < 1 or cap > self._spec.output_tokens:
             raise ValueError("The model request must preserve its admitted output-token cap.")

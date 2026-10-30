@@ -432,7 +432,16 @@ def test_claude_specs_route_only_to_anthropic_within_their_price_bounds(provider
             accounted_model(
                 context, "fake-router-key", spec=CLAUDE_HAIKU, http_client=client
             ).invoke("Too long.", max_output_tokens=CLAUDE_HAIKU.output_tokens + 1)
-    opus, haiku = requests
+        forced = accounted_model(
+            context, "fake-router-key", spec=CLAUDE_HAIKU, http_client=client
+        ).bind_tools(
+            [{"type": "function", "function": {"name": "ClaimBatch", "parameters": {}}}],
+            tool_choice="required",
+        )
+        forced.invoke("Return claims.")
+    opus, haiku, structured = requests
+    # Anthropic endpoints refuse forced tool choice, so it is sent as "auto".
+    assert structured["tool_choice"] == "auto"
     assert opus["model"] == CLAUDE_OPUS.id and haiku["model"] == CLAUDE_HAIKU.id
     assert opus["max_output_tokens"] == CLAUDE_OPUS.output_tokens
     assert opus["provider"]["only"] == ["anthropic"]
@@ -445,7 +454,7 @@ def test_claude_specs_route_only_to_anthropic_within_their_price_bounds(provider
     assert haiku["provider"]["max_price"]["completion"] == 0.5
     reserved = sorted(item["reserved_microusd"] for item in operations(context))
     # Haiku's full-context bound is far below Opus's; each is reserved before dispatch.
-    assert reserved[0] < 200_000 < 5_000_000 < reserved[1]
+    assert reserved[0] < 200_000 < 5_000_000 < reserved[-1]
 
 
 def jev_answer(questions):
