@@ -14,7 +14,12 @@ from langgraph.types import Command, interrupt
 from psycopg.conninfo import conninfo_to_dict
 
 from condere.runtime.checkpoints import checkpoint_store
-from condere.runtime.operations import ProviderResult, ProviderUncertain, execute_once
+from condere.runtime.operations import (
+    ProviderRefused,
+    ProviderResult,
+    ProviderUncertain,
+    execute_once,
+)
 from condere.runtime.state import (
     AssessmentStore,
     BudgetExceeded,
@@ -377,6 +382,18 @@ def test_provider_wrapper_reuses_saved_results_and_keeps_failure_liability(store
     assert len(calls) == 2
     with pytest.raises(RecoveryRequired):
         store.publish_dossier(owner, case["id"], case["generation"], {"result": "x"}, {})
+
+    def closed_client():
+        raise RuntimeError("Cannot send a request, as the client has been closed.")
+
+    with pytest.raises(ProviderRefused):
+        execute_once(store, **(options | {"key": "never-sent", "invoke": closed_client}))
+    never_sent = next(
+        item
+        for item in store.operations(owner, case["id"])
+        if item["operation_key"] == "never-sent"
+    )
+    assert (never_sent["state"], never_sent["actual_microusd"]) == ("failed", 0)
 
     def worker_lost():
         raise asyncio.CancelledError

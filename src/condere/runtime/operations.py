@@ -88,30 +88,19 @@ def execute_once(
                 "operation_id": operation["id"],
             },
         )
+    except RuntimeError as error:
+        if "client has been closed" not in str(error):
+            _hold(store, owner, assessment_id, operation, kind, error)
+        # httpx raises this before sending anything (seen 2026-10-30 when a subagent call
+        # started after its worker closed the client), so nothing can have been billed.
+        refused = ProviderRefused(kind, None, f"not sent: {error}")
+        _refuse(store, owner, assessment_id, operation, refused)
+        raise refused from error
     except ProviderRefused as refused:
-        store.finish_operation(
-            owner,
-            assessment_id,
-            operation["id"],
-            {"refused": refused.status, "detail": refused.detail},
-            succeeded=False,
-            actual_microusd=0,
-            cost_basis={
-                "basis": "provider refused before starting billable work",
-                "status": refused.status,
-            },
-            reconciliation={"basis": "refusal observed for this dispatch"},
-        )
+        _refuse(store, owner, assessment_id, operation, refused)
         raise
     except Exception as error:
-        # A timeout, invalid response, or interrupted save is not proof of no bill.
-        # Keep the dispatch identity and its reservation for explicit reconciliation.
-        detail = f"{type(error).__name__}: {str(error)[:500]}"
-        store.mark_uncertain(owner, assessment_id, operation["id"], detail)
-        raise ProviderUncertain(
-            f"{kind} call failed and may have billed ({detail}); it is held for reconciliation "
-            "and will not be bought again."
-        ) from error
+        _hold(store, owner, assessment_id, operation, kind, error)
     except BaseException:
         # Losing the worker itself (cancellation, exit) stops the assessment as before.
         try:
@@ -119,6 +108,35 @@ def execute_once(
         except Conflict:
             pass  # A stale worker must not interrupt newer, explicitly resumed work.
         raise
+
+
+def _refuse(store, owner, assessment_id, operation, refused: ProviderRefused) -> None:
+    store.finish_operation(
+        owner,
+        assessment_id,
+        operation["id"],
+        {"refused": refused.status, "detail": refused.detail},
+        succeeded=False,
+        actual_microusd=0,
+        cost_basis={
+            "basis": "provider refused or request not sent before any billable work",
+            "status": refused.status,
+        },
+        reconciliation={"basis": "refusal observed for this dispatch"},
+    )
+
+
+def _hold(store, owner, assessment_id, operation, kind, error: Exception):
+    """A timeout, invalid response, or interrupted save is not proof of no bill.
+
+    Keep the dispatch identity and its reservation for explicit reconciliation.
+    """
+    detail = f"{type(error).__name__}: {str(error)[:500]}"
+    store.mark_uncertain(owner, assessment_id, operation["id"], detail)
+    raise ProviderUncertain(
+        f"{kind} call failed and may have billed ({detail}); it is held for reconciliation "
+        "and will not be bought again."
+    ) from error
 
 
 async def execute_once_async(store: AssessmentStore, **kwargs) -> dict:
