@@ -16,6 +16,7 @@ from condere.runtime.providers import (
     CLAUDE_OPUS,
     MODEL_ID,
     MODEL_OUTPUT_TOKENS,
+    ApifyResearch,
     ExaResearch,
     JevDecisions,
     ProviderContext,
@@ -549,3 +550,99 @@ def test_exa_search_options_reach_the_request_and_raise_the_bound(provider_case)
     assert source.provenance["links"] == ["https://example.com/follow-up"]
     assert source.provenance["live_fetch"] is True
     assert any("highlights only" in item for item in source.limitations)
+
+
+TWEET = {
+    "id": "2115777960355708930",
+    "url": "https://x.com/example/status/2115777960355708930",
+    "createdAt": "Thu Oct 29 12:09:09 +0000 2026",
+    "authorUsername": "example",
+    "text": "Data is stored locally in sqlite-vec but it also leaves the system.",
+    "conversationId": "2115760778951409799",
+    "likeCount": 1,
+    "viewCount": 77,
+    "entities": {"urls": [{"expandedUrl": "https://example.com/announcement"}]},
+}
+REDDIT_POST = {
+    "id": "t3_1xgtdb5",
+    "dataType": "post",
+    "title": "SQLite editor with sqlite_vec",
+    "body": "",
+    "postUrl": "https://www.reddit.com/r/sqlite/comments/1xgtdb5/editor/",
+    "contentUrl": "https://github.com/example/editor",
+    "outboundUrlHost": "github.com",
+    "createdAt": "2026-10-27T14:01:49.000Z",
+    "communityName": "r/sqlite",
+    "upVotes": 2,
+    "commentsCount": 0,
+}
+VIDEO = {
+    "video_id": "1UL8iZJD38U",
+    "url": "https://www.youtube.com/watch?v=1UL8iZJD38U",
+    "title": "Fictional demo",
+    "channel_name": "Example",
+    "text": "In this demo we run vector search inside SQLite.",
+    "description": "Docs: https://example.com/docs",
+}
+
+
+def test_apify_runs_are_capped_upstream_and_saved_with_origin_groups(provider_case):
+    from decimal import Decimal
+
+    context, evidence = provider_case
+    requests = []
+    replies = {"xquik": [TWEET], "harshmaur": [REDDIT_POST], "johnvc": [VIDEO]}
+
+    def respond(request):
+        requests.append(request)
+        assert request.headers["authorization"] == "Bearer fake-apify-token"
+        owner = request.url.path.split("/acts/")[1].split("~")[0]
+        return httpx.Response(201, json=replies[owner])
+
+    apify = ApifyResearch(
+        context, evidence, "fake-apify-token", transport=httpx.MockTransport(respond)
+    )
+    try:
+        tweets = apify.x_posts(
+            ("https://x.com/example/status/2115777960355708930",), "Need the post"
+        )
+        threads = apify.reddit("Need user pain", query="sqlite vector extension", max_posts=5)
+        videos = apify.youtube_transcripts(("https://youtu.be/1UL8iZJD38U",), "Need the demo")
+        for call in (
+            lambda: apify.x_posts(("not-a-tweet",), "Need the post"),
+            lambda: apify.reddit("Need pain", thread_urls=("https://example.com/r/x",)),
+            lambda: apify.reddit("Need pain"),
+            lambda: apify.youtube_transcripts(("https://vimeo.com/1",), "Need demo"),
+        ):
+            with pytest.raises(ValueError):
+                call()
+    finally:
+        apify.close()
+    assert [request.url.path for request in requests] == [
+        "/v2/acts/xquik~x-tweet-scraper/run-sync-get-dataset-items",
+        "/v2/acts/harshmaur~reddit-scraper/run-sync-get-dataset-items",
+        "/v2/acts/johnvc~YoutubeTranscripts/run-sync-get-dataset-items",
+    ]
+    assert json.loads(requests[0].content)["tweetIds"] == ["2115777960355708930"]
+    # One tweet costs far below the minimum cap that keeps the Actor from returning nothing.
+    assert Decimal(requests[0].url.params["maxTotalChargeUsd"]) == Decimal("0.01")
+    # Five posts with ten comments each is 55 results: (0.02 + 55 * 0.002) * 1.25.
+    assert Decimal(requests[1].url.params["maxTotalChargeUsd"]) == Decimal("0.1625")
+    tweet = tweets["results"][0]
+    assert tweet["published_at"] == "2026-10-29T12:09:09+00:00"
+    assert tweet["origin_group"] == "x:conversation:2115760778951409799"
+    source = evidence.source(context.owner, context.assessment_id, tweet["source_id"])
+    assert source.provenance["links"] == ["https://example.com/announcement"]
+    assert "@example on X" in evidence.text(context.owner, context.assessment_id, source.id)
+    assert threads["results"][0]["origin_group"] == "reddit:t3_1xgtdb5"
+    reddit = evidence.source(context.owner, context.assessment_id, threads["source_ids"][0])
+    assert reddit.provenance["links"] == ["https://github.com/example/editor"]
+    video = evidence.source(context.owner, context.assessment_id, videos["source_ids"][0])
+    assert video.provenance["links"] == ["https://example.com/docs"]
+    assert any("Upload date" in item for item in video.limitations)
+    kinds = [item["kind"] for item in operations(context)]
+    assert kinds == ["apify", "apify", "apify"]
+    pending = context.state.spending(context.owner, context.assessment_id)["budget"]
+    assert pending["pending_microusd"] == sum(
+        item["reserved_microusd"] for item in operations(context)
+    )

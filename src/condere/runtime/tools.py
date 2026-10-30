@@ -26,7 +26,7 @@ from condere.runtime.contracts import (
 from condere.runtime.dossier import FinalReview
 from condere.runtime.evidence import EvidenceError, SourceDocument
 from condere.runtime.indexing import pinned_snapshot
-from condere.runtime.providers import ExaResearch
+from condere.runtime.providers import ApifyResearch, ExaResearch
 from condere.runtime.repositories import canonical_repository, stage_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
@@ -52,6 +52,7 @@ def worker_tools(
     sandbox: SmolSandbox,
     repository_cache: Path,
     allowed_repositories: set[str],
+    social: ApifyResearch | None = None,
 ) -> list:
     """Build only the assigned tools, using identities fixed by the trusted coordinator."""
     state, evidence = service.state, service.evidence
@@ -68,6 +69,15 @@ def worker_tools(
             != (owner, assessment_id, generation, assigned["assignment"]["role"])
         ):
             raise Conflict("Research must use this worker's assessment and spending ledger.")
+    if social is not None:
+        context = social.context
+        if (
+            context.state is not state
+            or social.evidence is not evidence
+            or (context.owner, context.assessment_id, context.generation, context.worker_role)
+            != (owner, assessment_id, generation, assigned["assignment"]["role"])
+        ):
+            raise Conflict("Social research must use this worker's assessment and ledger.")
 
     rejected = []
 
@@ -356,6 +366,74 @@ def worker_tools(
             )
         return research.fetch(url, material_gap)
 
+    def require_social():
+        if social is None:
+            raise Conflict("Social research is not configured for this worker.")
+        return social
+
+    @tool
+    def x_posts(posts: list[str], material_gap: str) -> dict:
+        """Read specific tweets by ID or x.com status URL, such as one supplied in the brief.
+
+        Each result names its conversation; call x_conversation for the replies.
+        """
+        guard("x_posts")
+        return require_social().x_posts(tuple(posts), material_gap)
+
+    @tool
+    def x_conversation(conversation_id: str, material_gap: str, max_items: int = 30) -> dict:
+        """Read the replies and thread under a tweet, by its conversation ID."""
+        guard("x_conversation")
+        return require_social().x_conversation(conversation_id, material_gap, max_items=max_items)
+
+    @tool
+    def x_search(
+        query: str,
+        material_gap: str,
+        since: date | None = None,
+        max_items: int = 30,
+        sort: Literal["Top", "Latest"] = "Top",
+    ) -> dict:
+        """Search X for what practitioners say now: launches, complaints, workarounds.
+
+        Supports X search syntax (quotes, OR, -exclusions, lang:en). Set since for recency.
+        """
+        guard("x_search")
+        return require_social().x_search(
+            query, material_gap, since=since, max_items=max_items, sort=sort
+        )
+
+    @tool
+    def reddit_research(
+        material_gap: str,
+        thread_urls: list[str] | None = None,
+        query: str | None = None,
+        community: str | None = None,
+        posted_after: date | None = None,
+        max_posts: int = 10,
+        comments_per_post: int = 10,
+    ) -> dict:
+        """Read Reddit threads or search posts with top comments: user pain, costs, switching.
+
+        Use community (for example r/selfhosted) to stay in the relevant audience.
+        """
+        guard("reddit_research")
+        return require_social().reddit(
+            material_gap,
+            thread_urls=tuple(thread_urls or ()),
+            query=query,
+            community=community,
+            posted_after=posted_after,
+            max_posts=max_posts,
+            comments_per_post=comments_per_post,
+        )
+
+    @tool
+    def youtube_transcripts(videos: list[str], material_gap: str) -> dict:
+        """Transcribe up to 5 YouTube videos: demos, talks and walkthroughs of a capability."""
+        guard("youtube_transcripts")
+        return require_social().youtube_transcripts(tuple(videos), material_gap)
+
     @tool
     def inspect_repository(
         repository_url: str, paths: list[str] | None = None, commit: str | None = None
@@ -564,6 +642,11 @@ def worker_tools(
         search_public,
         fetch_public_source,
         fetch_public_url,
+        x_posts,
+        x_conversation,
+        x_search,
+        reddit_research,
+        youtube_transcripts,
         inspect_repository,
         submit_question,
         submit_review,

@@ -751,3 +751,390 @@ class JevDecisions:
         if operation["state"] != "succeeded":
             raise Conflict("The saved decision operation failed; it will not be repeated.")
         return operation["result"] | {"operation_id": operation["id"]}
+
+
+@dataclass(frozen=True)
+class ApifyActor:
+    name: str
+    start_usd: Decimal
+    item_usd: Decimal
+
+
+# Pay-per-event prices on the FREE tier, checked 2026-10-30. Each run passes the bound
+# as Apify's maxTotalChargeUsd, so the provider itself refuses to bill above it.
+APIFY_ACTORS = {
+    "x": ApifyActor("xquik~x-tweet-scraper", Decimal("0"), Decimal("0.00015")),
+    # $0.02 actor start per GB at 1 GB, $0.002 per saved post or comment.
+    "reddit": ApifyActor("harshmaur~reddit-scraper", Decimal("0.02"), Decimal("0.002")),
+    # $0.00275 per transcribed video plus $0.00001 per stored row and per start.
+    "youtube": ApifyActor("johnvc~YoutubeTranscripts", Decimal("0.00001"), Decimal("0.00276")),
+}
+APIFY_MARGIN = Decimal("1.25")
+# A very small maxTotalChargeUsd makes Actors return nothing: a $0.0002 cap on a one-tweet
+# lookup produced an empty run, while $0.01 succeeded (2026-10-30). Never cap below this.
+APIFY_MIN_CHARGE_USD = Decimal("0.01")
+APIFY_HOSTS = {
+    "x": {"x.com", "twitter.com", "mobile.twitter.com"},
+    "reddit": {"reddit.com", "old.reddit.com", "np.reddit.com"},
+    "youtube": {"youtube.com", "m.youtube.com", "youtu.be"},
+}
+X_FIELDS = [
+    "id",
+    "text",
+    "url",
+    "createdAt",
+    "authorUsername",
+    "likeCount",
+    "replyCount",
+    "retweetCount",
+    "viewCount",
+    "conversationId",
+    "isReply",
+    "inReplyToId",
+    "quotedTweetId",
+    "entities",
+]
+_TWEET_ID = re.compile(
+    r"^(?:https://(?:www\.)?(?:x|twitter)\.com/\w+/status/)?(\d{5,25})(?:[/?].*)?$"
+)
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"')\]]+")
+
+
+def apify_bound(actor: ApifyActor, items: int) -> Decimal:
+    bound = ((actor.start_usd + items * actor.item_usd) * APIFY_MARGIN).quantize(Decimal("0.0001"))
+    return max(bound, APIFY_MIN_CHARGE_USD)
+
+
+def platform_url(value: str, platform: str) -> str:
+    url = public_url(value)
+    host = (urlsplit(url).hostname or "").removeprefix("www.")
+    if host not in APIFY_HOSTS[platform]:
+        raise ValueError(f"Expected a public {platform} URL.")
+    return url
+
+
+def tweet_id(value: str) -> str:
+    match = _TWEET_ID.match(value.strip())
+    if not match:
+        raise ValueError("Use a numeric tweet ID or an x.com/twitter.com status URL.")
+    return match.group(1)
+
+
+def _public_links(values) -> list[str]:
+    links = []
+    for value in values:
+        try:
+            links.append(public_url(value))
+        except (ValueError, TypeError):
+            continue
+    return list(dict.fromkeys(links))[:EXA_LINKS]
+
+
+def _x_source(item: dict) -> dict:
+    created = item.get("createdAt")
+    try:
+        published = datetime.strptime(created, "%a %b %d %H:%M:%S %z %Y").isoformat()
+    except (TypeError, ValueError):
+        published = None
+    metrics = ", ".join(
+        f"{name} {item[key]}"
+        for name, key in (
+            ("likes", "likeCount"),
+            ("replies", "replyCount"),
+            ("reposts", "retweetCount"),
+            ("views", "viewCount"),
+        )
+        if item.get(key) is not None
+    )
+    urls = (item.get("entities") or {}).get("urls") or []
+    return {
+        "origin": item.get("url"),
+        "text": f"@{item.get('authorUsername')} on X, {created}:\n{item.get('text', '')}"
+        + (f"\n\n({metrics})" if metrics else ""),
+        "published_at": published,
+        "title": f"@{item.get('authorUsername')} on X",
+        "origin_group": f"x:conversation:{item.get('conversationId') or item.get('id')}",
+        "links": _public_links(
+            entry.get("expandedUrl") for entry in urls if isinstance(entry, dict)
+        ),
+    }
+
+
+def _reddit_source(item: dict) -> dict:
+    post = item.get("dataType", "post") == "post"
+    origin = item.get("postUrl") if post else item.get("url") or item.get("postUrl")
+    thread = item.get("postId") or item.get("parsedPostId") or item.get("id")
+    heading = (
+        f"{item.get('communityName')} post: {item.get('title', '')}"
+        if post
+        else f"{item.get('communityName')} comment by {item.get('authorName')}"
+    )
+    counts = (
+        f"(upvotes {item.get('upVotes')}, comments {item.get('commentsCount')})" if post else ""
+    )
+    return {
+        "origin": origin,
+        "text": "\n\n".join(part for part in (heading, item.get("body") or "", counts) if part),
+        "published_at": item.get("createdAt"),
+        "title": item.get("title") or heading,
+        "origin_group": f"reddit:{thread if post else item.get('postId') or thread}",
+        "links": _public_links(
+            [item.get("contentUrl")] if item.get("outboundUrlHost") != "reddit.com" else []
+        ),
+    }
+
+
+def _youtube_source(item: dict) -> dict:
+    transcript = item.get("text") or item.get("non_timestamped") or ""
+    return {
+        "origin": item.get("url"),
+        "text": f"{item.get('title')} — {item.get('channel_name')} (YouTube)\n\n{transcript}",
+        "published_at": None,
+        "title": item.get("title"),
+        "origin_group": f"youtube:{item.get('video_id')}",
+        "links": _public_links(_URL_IN_TEXT.findall(item.get("description") or "")),
+    }
+
+
+PARSERS = {"x": _x_source, "reddit": _reddit_source, "youtube": _youtube_source}
+
+
+class ApifyResearch:
+    """X, Reddit and YouTube retrieval through selected Apify Actors and the ledger."""
+
+    def __init__(
+        self,
+        context: ProviderContext,
+        evidence: EvidenceStore,
+        api_token: str,
+        *,
+        private_terms: tuple[str, ...] = (),
+        transport=None,
+    ):
+        if not api_token:
+            raise ValueError("An Apify token is required.")
+        self.context, self.evidence = context, evidence
+        self.private_terms = (api_token, context.owner, context.assessment_id, *private_terms)
+        self.client = httpx.Client(
+            base_url="https://api.apify.com/v2",
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=180,
+            follow_redirects=False,
+            transport=transport,
+        )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def x_posts(self, posts: tuple[str, ...], material_gap: str) -> dict:
+        """Look up specific tweets by ID or status URL."""
+        ids = list(dict.fromkeys(tweet_id(value) for value in posts))
+        if not 1 <= len(ids) <= 20:
+            raise ValueError("Look up 1-20 tweets at a time.")
+        body = {"tweetIds": ids, "maxItems": len(ids)}
+        return self._run("x", body | self._x_output(), len(ids), material_gap)
+
+    def x_conversation(
+        self, conversation_id: str, material_gap: str, *, max_items: int = 30
+    ) -> dict:
+        """Collect a conversation thread by its first tweet's ID."""
+        if type(max_items) is not int or not 1 <= max_items <= 100:
+            raise ValueError("Collect 1-100 tweets from a conversation.")
+        body = {"conversationIds": [tweet_id(conversation_id)], "maxItems": max_items}
+        return self._run("x", body | self._x_output(), max_items, material_gap)
+
+    def x_search(
+        self,
+        query: str,
+        material_gap: str,
+        *,
+        since: date | None = None,
+        max_items: int = 30,
+        sort: str = "Top",
+    ) -> dict:
+        if type(max_items) is not int or not 1 <= max_items <= 100:
+            raise ValueError("Search 1-100 tweets at a time.")
+        if sort not in {"Top", "Latest"}:
+            raise ValueError("Sort must be Top or Latest.")
+        body = {
+            "searchTerms": [public_query(query, self.private_terms)],
+            "maxItems": max_items,
+            "queryType": sort,
+        }
+        if since:
+            body["time"] = {"since": since.isoformat()}
+        return self._run("x", body | self._x_output(), max_items, material_gap)
+
+    def reddit(
+        self,
+        material_gap: str,
+        *,
+        thread_urls: tuple[str, ...] = (),
+        query: str | None = None,
+        community: str | None = None,
+        posted_after: date | None = None,
+        max_posts: int = 10,
+        comments_per_post: int = 10,
+    ) -> dict:
+        """Read specific threads or search posts, with their top comments."""
+        if not thread_urls and not query:
+            raise ValueError("Supply thread URLs or a search query.")
+        if type(max_posts) is not int or not 1 <= max_posts <= 25:
+            raise ValueError("Read 1-25 posts per search or URL.")
+        if type(comments_per_post) is not int or not 0 <= comments_per_post <= 30:
+            raise ValueError("Read 0-30 comments per post.")
+        urls = [platform_url(url, "reddit") for url in thread_urls][:5]
+        body = {
+            "startUrls": [{"url": url} for url in urls],
+            "searchTerms": [public_query(query, self.private_terms)] if query else [],
+            "searchSort": "relevance",
+            "maxPostsCount": max_posts,
+            "crawlCommentsPerPost": comments_per_post > 0,
+            "maxCommentsPerPost": comments_per_post,
+            "searchComments": False,
+        }
+        if community:
+            if not re.fullmatch(r"(?:r/)?[A-Za-z0-9_]{2,21}", community):
+                raise ValueError("Name one subreddit, such as r/selfhosted.")
+            body["withinCommunity"] = community
+        if posted_after:
+            body["postedAfter"] = posted_after.isoformat()
+        targets = len(urls) + (1 if query else 0)
+        items = targets * max_posts * (1 + comments_per_post)
+        return self._run("reddit", body, items, material_gap)
+
+    def youtube_transcripts(self, videos: tuple[str, ...], material_gap: str) -> dict:
+        urls = list(dict.fromkeys(platform_url(url, "youtube") for url in videos))
+        if not 1 <= len(urls) <= 5:
+            raise ValueError("Transcribe 1-5 videos at a time.")
+        body = {
+            "youtube_url": urls,
+            "languages": ["en"],
+            "output_formats": ["text"],
+            "include_metadata": True,
+        }
+        return self._run("youtube", body, len(urls), material_gap)
+
+    @staticmethod
+    def _x_output() -> dict:
+        return {"outputVariant": "rich", "fieldStyle": "camelCase", "fields": X_FIELDS}
+
+    def _run(self, platform: str, body: dict, items: int, material_gap: str) -> dict:
+        if not material_gap.strip():
+            raise ValueError("Explain the material missing fact before purchasing new research.")
+        actor = APIFY_ACTORS[platform]
+        bound = apify_bound(actor, items)
+        context = self.context
+        key = "apify:" + content_hash([actor.name, body])
+        params = {"timeout": 150, "memory": 1024, "maxTotalChargeUsd": str(bound)}
+
+        def invoke():
+            with self.client.stream(
+                "POST", f"/acts/{actor.name}/run-sync-get-dataset-items", params=params, json=body
+            ) as response:
+                response.raise_for_status()
+                raw = bytearray()
+                for chunk in response.iter_bytes():
+                    raw.extend(chunk)
+                    if len(raw) > MAX_RESPONSE_BYTES:
+                        raise ValueError("The provider response exceeded its admitted size.")
+            data = json.loads(raw)
+            if not isinstance(data, list):
+                raise ValueError("The Actor did not return a dataset item list.")
+            return ProviderResult({"items": data, "retrieved_at": datetime.now(UTC).isoformat()})
+
+        operation = execute_once(
+            context.state,
+            owner=context.owner,
+            assessment_id=context.assessment_id,
+            generation=context.generation,
+            key=key,
+            kind="apify",
+            request={"actor": actor.name, "body": body, "params": params},
+            max_microusd=microusd(bound),
+            dispatch_identity={
+                "provider": "apify",
+                "actor": actor.name,
+                "local_request_key": key,
+                "material_gap": material_gap,
+            },
+            invoke=invoke,
+        )
+        if operation["state"] != "succeeded":
+            raise Conflict("The saved research operation failed; it will not be purchased again.")
+        saved = operation["result"]
+        context.state.record_pending_cost(
+            context.owner,
+            context.assessment_id,
+            operation["id"],
+            microusd(bound),
+            {
+                "basis": "Apify pay-per-event bound, enforced upstream by maxTotalChargeUsd; "
+                "the run's actual charge is reconciled from Apify usage",
+                "actor": actor.name,
+                "pricing_source": f"https://apify.com/{actor.name.replace('~', '/')}/pricing",
+            },
+        )
+        results, rejected = [], []
+        for index, item in enumerate(saved["items"]):
+            parsed = PARSERS[platform](item) if isinstance(item, dict) else {}
+            try:
+                origin = public_url(parsed.get("origin") or "")
+            except ValueError:
+                rejected.append({"index": index, "reason": "No admissible public URL."})
+                continue
+            limitations = [
+                "Original bytes are the Actor's dataset item, not a platform archive.",
+                "Platform posts are first-person accounts; verify claims before relying on them.",
+            ]
+            if platform == "youtube":
+                limitations.append("Upload date was not retrieved; transcripts may be generated.")
+            source = self.evidence.save_source(
+                context.owner,
+                context.assessment_id,
+                kind="web",
+                origin=origin,
+                original=json.dumps(item, sort_keys=True).encode(),
+                text=parsed["text"],
+                media_type="application/json",
+                provenance={
+                    "provider": "apify",
+                    "actor": actor.name,
+                    "operation_id": operation["id"],
+                    "result_index": index,
+                    "published_at": parsed["published_at"],
+                    "title": parsed["title"],
+                    "origin_group": parsed["origin_group"],
+                    "links": parsed["links"],
+                    "public": True,
+                },
+                limitations=limitations,
+                retrieved_at=datetime.fromisoformat(saved["retrieved_at"]),
+            )
+            results.append(
+                {
+                    "source_id": source.id,
+                    "url": origin,
+                    "title": parsed["title"],
+                    "published_at": parsed["published_at"],
+                    "origin_group": parsed["origin_group"],
+                    "outgoing_links": len(parsed["links"]),
+                }
+            )
+        notices = (
+            []
+            if saved["items"]
+            else [
+                "The Actor returned no items. This is not evidence of absence: the post may be "
+                "deleted or private, or the query too narrow. Try another route or query."
+            ]
+        )
+        return {
+            "operation_id": operation["id"],
+            "source_ids": [item["source_id"] for item in results],
+            "results": results,
+            "rejected_results": rejected,
+            "provider_notices": notices,
+            "cost_status": "pending",
+            "reserved_microusd": microusd(bound),
+        }
