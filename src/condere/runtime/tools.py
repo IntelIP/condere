@@ -36,6 +36,37 @@ class CorrectionLimitReached(RuntimeError):
     """Stops a worker whose submissions keep failing; accepted records and drafts remain."""
 
 
+def _address(url: str) -> tuple[str, str]:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").removeprefix("www.")
+    return ("x.com" if host == "twitter.com" else host, parts.path.rstrip("/"))
+
+
+def _linked_from_start(brief: dict, records: list[dict], repository_url: str) -> dict | None:
+    """A repository the owner's supplied starting URL links to, such as a post naming a project.
+
+    On 2026-10-30 an X-post assessment waited ~4 minutes for code analysis because the post's
+    GitHub link did not admit the repository until a separate search saved its page.
+    """
+    starts = {_address(url) for url in brief.get("public_references") or []}
+    for record in records:
+        source = SourceDocument.model_validate(record["payload"])
+        if _address(source.origin) not in starts:
+            continue
+        for link in source.provenance.get("links") or []:
+            parts = urlsplit(str(link))
+            segments = parts.path.strip("/").split("/")
+            if parts.hostname != "github.com" or len(segments) < 2:
+                continue
+            try:
+                linked = canonical_repository(f"https://github.com/{segments[0]}/{segments[1]}")
+            except ValueError:
+                continue
+            if linked == repository_url:
+                return {"basis": "linked from the supplied starting URL", "source_id": source.id}
+    return None
+
+
 def worker_tools(
     service: AssessmentService,
     *,
@@ -456,7 +487,16 @@ def worker_tools(
                     basis = {"basis": "saved public research result", "source_id": source.id}
                     break
         if basis is None:
-            raise ValueError("Repository is outside the brief and saved public research results.")
+            basis = _linked_from_start(
+                state.get(owner, assessment_id)["brief"],
+                state.records(owner, assessment_id, kind="source"),
+                repository_url,
+            )
+        if basis is None:
+            raise ValueError(
+                "Repository is outside the brief, saved public research results and the links "
+                "of the supplied starting URL."
+            )
         snapshot = pinned_snapshot(
             state, owner, assessment_id, generation, repository_url, basis, repository_cache, commit
         )
