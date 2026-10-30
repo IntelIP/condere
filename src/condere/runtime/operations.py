@@ -31,11 +31,15 @@ class ProviderUncertain(Exception):
     """The call failed in a way that may have billed; its reservation awaits reconciliation."""
 
 
+# 503 (no provider available) and 529 (overloaded) come back before any work starts; a Jev
+# decision call refused with 529 on 2026-10-30 stopped a finished analysis at the decision.
+UNSERVED = {503, 529}
+
+
 def refusal(provider: str, status: int, detail: str) -> ProviderRefused | None:
-    """A client error (4xx other than a timeout) means the provider did no billable work."""
-    return (
-        ProviderRefused(provider, status, detail) if 400 <= status < 500 and status != 408 else None
-    )
+    """A client error (4xx other than a timeout) or an unserved request did no billable work."""
+    refused = (400 <= status < 500 and status != 408) or status in UNSERVED
+    return ProviderRefused(provider, status, detail) if refused else None
 
 
 def previously_failed(provider: str, operation: dict) -> ProviderRefused:

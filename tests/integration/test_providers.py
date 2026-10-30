@@ -226,7 +226,7 @@ def test_model_failure_keeps_liability_and_never_retries(provider_case, failure)
     def timeout(request):
         calls.append(request)
         if failure == "server_error":
-            return httpx.Response(503, json={"error": {"message": "Simulated provider outage"}})
+            return httpx.Response(500, json={"error": {"message": "Simulated provider outage"}})
         raise httpx.ReadTimeout("Simulated unknown provider outcome", request=request)
 
     with httpx.Client(transport=httpx.MockTransport(timeout)) as client:

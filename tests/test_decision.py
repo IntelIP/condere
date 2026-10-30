@@ -5,7 +5,8 @@ import hashlib
 import pytest
 from test_spinoff import ASSESSMENT, analysis
 
-from condere.runtime.decision import BRIEF_LIMIT, CRITERIA, decide, render_brief
+from condere.runtime.decision import BRIEF_LIMIT, CRITERIA, _ask, decide, render_brief
+from condere.runtime.operations import ProviderRefused, ProviderUncertain
 from condere.runtime.spinoff import Analysis
 
 
@@ -15,7 +16,7 @@ class ScriptedJev:
     def __init__(self, gates: dict, verdict="pursue", option="O1"):
         self.gates, self.verdict, self.option, self.asked = gates, verdict, option, []
 
-    def ask(self, state, questions, purpose):
+    def ask(self, state, questions, purpose, attempt=0):
         self.asked.append((state, questions, purpose))
         answers = {}
         for name, question in questions.items():
@@ -80,3 +81,23 @@ def test_oversized_brief_is_refused_before_any_request():
     with pytest.raises(ValueError, match="over 30000"):
         render_brief(Analysis.model_validate(long), "Assess it.")
     assert BRIEF_LIMIT < 32_000
+
+
+def test_a_refused_decision_call_is_asked_again_and_an_uncertain_one_is_not():
+    class Flaky:
+        def __init__(self, error):
+            self.error, self.attempts = error, []
+
+        def ask(self, state, questions, purpose, attempt=0):
+            self.attempts.append(attempt)
+            if attempt == 0:
+                raise self.error
+            return {"answers": {}, "model": "jev"}
+
+    refused = Flaky(ProviderRefused("jev", 529, "overloaded"))
+    assert _ask(refused, ["brief"], {}, "verdict", sleep=lambda _: None)["model"] == "jev"
+    assert refused.attempts == [0, 1]
+    held = Flaky(ProviderUncertain("may have billed"))
+    with pytest.raises(ProviderUncertain):
+        _ask(held, ["brief"], {}, "verdict", sleep=lambda _: None)
+    assert held.attempts == [0]

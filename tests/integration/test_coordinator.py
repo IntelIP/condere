@@ -47,7 +47,7 @@ class ScriptedJev:
     def __init__(self):
         self.asked = []
 
-    def ask(self, state, questions, purpose):
+    def ask(self, state, questions, purpose, attempt=0):
         self.asked.append(purpose)
         answers = {}
         for name, question in questions.items():

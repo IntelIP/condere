@@ -723,7 +723,7 @@ class JevDecisions:
     def close(self) -> None:
         self.client.close()
 
-    def ask(self, state: list[str], questions: dict, purpose: str) -> dict:
+    def ask(self, state: list[str], questions: dict, purpose: str, *, attempt: int = 0) -> dict:
         if not purpose.strip():
             raise ValueError("Name the decision these questions serve.")
         if not state or any(not isinstance(item, str) or not item.strip() for item in state):
@@ -740,7 +740,8 @@ class JevDecisions:
         if size > JEV_REQUEST_BYTES:
             raise ValueError("The decision request exceeds its admitted size.")
         context = self.context
-        key = "jev:" + content_hash(body)
+        # A refused request bought nothing; a later attempt is its own ledger operation.
+        key = "jev:" + content_hash(body) + (f":attempt-{attempt}" if attempt else "")
         # A token is at least one byte, so the request size bounds the supplied tokens;
         # Jev's own prompt overhead is added on top.
         tokens = size + JEV_OVERHEAD_TOKENS + JEV_TOKENS_PER_QUESTION * len(questions)

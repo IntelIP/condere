@@ -7,7 +7,9 @@ re-checked when the decision model changes.
 """
 
 import hashlib
+import time
 
+from condere.runtime.operations import ProviderRefused
 from condere.runtime.spinoff import (
     Analysis,
     ArtifactLink,
@@ -187,12 +189,27 @@ def _choice(answer: dict, keys) -> dict:
     return {"value": value, "distribution": distribution, "confidence": answer.get("confidence")}
 
 
+REFUSAL_BACKOFF_SECONDS = (5, 20)
+
+
+def _ask(jev, state: list[str], questions: dict, purpose: str, sleep=time.sleep) -> dict:
+    """Ask again after a refusal, which bought nothing; an uncertain call is never repeated."""
+    for attempt, pause in enumerate((*REFUSAL_BACKOFF_SECONDS, None)):
+        try:
+            return jev.ask(state, questions, purpose, attempt=attempt)
+        except ProviderRefused:
+            if pause is None:
+                raise
+            sleep(pause)
+    raise AssertionError("unreachable")
+
+
 def decide(jev, analysis: Analysis, prompt: str, assessment_id: str) -> tuple[Decision, str]:
     """Ask Jev, map its answers, and apply the code rules. Returns the decision and brief."""
     text = render_brief(analysis, prompt)
     gates, ratings, model = [], [], None
     for option in analysis.options:
-        answered = jev.ask([text], option_questions(option.id), f"assess option {option.id}")
+        answered = _ask(jev, [text], option_questions(option.id), f"assess option {option.id}")
         model = answered["model"]
         answers = answered["answers"]
         for gate in ("rights_clear", "asset_works"):
@@ -210,7 +227,7 @@ def decide(jev, analysis: Analysis, prompt: str, assessment_id: str) -> tuple[De
         for criterion in CRITERIA:
             choice = _choice(answers[criterion], RATINGS)
             ratings.append({"option": option.id, "criterion": criterion} | choice)
-    answered = jev.ask([text], overall_questions(analysis), "choose verdict, option and route")
+    answered = _ask(jev, [text], overall_questions(analysis), "choose verdict, option and route")
     answers = answered["answers"]
     raw = Decision.model_validate(
         {
