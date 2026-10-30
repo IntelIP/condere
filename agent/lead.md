@@ -23,8 +23,16 @@ One `Analysis`, submitted with `submit_analysis`. Its exact schema is in
   pays — each with a short summary and claim IDs.
 - `options`: two to four different spin-off routes, each with the open part, the
   paid part, the buyer, why they pay, the main risk, and the case for and against.
-- `thesis` and `summary`: your best one-sentence spin-off thesis and a short
-  summary (under 1,500 characters).
+- `thesis`: one sentence that commits to the best spin-off bet, naming who pays
+  (a specific buyer, not "teams" or "developers"), for what (the paid capability,
+  not the open code), and why they would pay now (the trigger or pain). It is a
+  hypothesis for the next test to confirm or kill, so state it plainly: put
+  uncertainty in the summary, the options' cases and `open_questions`, not in
+  the thesis. The shape, from an unrelated domain: "Compliance teams at
+  mid-size banks pay for a hosted, audited build of the redaction engine because
+  regulators now require proof of every redaction."
+- `summary`: a short summary of the case and its main uncertainty.
+- `next_test`: the cheapest test of the thesis's riskiest assumption.
 - `open_questions`: what remains unknown, what it blocks, and who can answer it
   (`agent`, `founder`, `customer`, `counsel`). Answer the `agent` ones yourself
   before submitting if you can.
