@@ -127,16 +127,24 @@ def brief_link(assessment_id: str, text: str) -> ArtifactLink:
 
 def option_questions(option_id: str) -> dict:
     questions = {
+        # Hard gates are blocker tests (owner direction 2026-10-30: guidance is pursue or
+        # stop). Asked as "is it proven?", they failed every option built on third-party
+        # open source in the acceptance batch, forcing stop although Jev leaned pursue.
         "rights_clear": {
             "type": "noul",
-            "instructions": f"For option {option_id}: do the brief's rights and license facts "
-            "permit this option (open-sourcing, hosting or selling as described)? Answer no if "
-            "a stated blocker prevents it.",
+            "instructions": f"For option {option_id}: is the option free of a rights blocker? "
+            "Answer no only if the brief shows a licence, ownership or redistribution term that "
+            "prevents what the option ships or sells (for example a non-commercial licence on "
+            "the part it depends on). Answer yes if no such blocker appears, even if rights "
+            "still need confirming.",
         },
         "asset_works": {
             "type": "noul",
-            "instructions": f"For option {option_id}: does the brief show the software exists "
-            "and works well enough to build this option on?",
+            "instructions": f"For option {option_id}: is the option free of a technical "
+            "blocker? Answer no only if the brief shows the software or model it builds on is "
+            "missing, abandoned, or unable to do what the option needs. Answer yes if the "
+            "capability exists and works for its stated use, even where integration is still "
+            "to be proven.",
         },
     }
     for criterion, question in CRITERIA.items():
