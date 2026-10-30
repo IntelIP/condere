@@ -525,6 +525,28 @@ def test_jev_answers_once_per_request_and_records_its_reported_cost(provider_cas
         jev.ask(["Brief."], {"box": {"type": "box", "instructions": "x"}}, "choose option")
 
 
+def test_a_refused_jev_call_is_retried_under_a_new_key_in_each_generation(provider_case):
+    context, _ = provider_case
+    questions = {"q": {"type": "noul", "instructions": "Is it?"}}
+    replies = iter([httpx.Response(529, text="system_overloaded")])
+
+    def respond(request):
+        reply = next(replies, None)
+        return reply or httpx.Response(
+            200, json=jev_answer(json.loads(request.content)["questions"])
+        )
+
+    jev = JevDecisions(context, "fake-router-key", transport=httpx.MockTransport(respond))
+    with pytest.raises(ProviderRefused):
+        jev.ask(["Brief."], questions, "decide")
+    with pytest.raises(ProviderRefused, match="not bought again"):
+        jev.ask(["Brief."], questions, "decide")  # The refused key itself is final.
+    assert jev.ask(["Brief."], questions, "decide", attempt=1)["answers"]["q"]
+    keys = [item["operation_key"] for item in operations(context)]
+    assert keys[1].endswith(f":g{context.generation}-attempt-1")
+    assert [item["actual_microusd"] for item in operations(context)][0] == 0
+
+
 def test_jev_rejects_answers_to_other_questions(provider_case):
     context, _ = provider_case
 

@@ -740,8 +740,12 @@ class JevDecisions:
         if size > JEV_REQUEST_BYTES:
             raise ValueError("The decision request exceeds its admitted size.")
         context = self.context
-        # A refused request bought nothing; a later attempt is its own ledger operation.
-        key = "jev:" + content_hash(body) + (f":attempt-{attempt}" if attempt else "")
+        # A refused request bought nothing; a later attempt is its own ledger operation. Attempts
+        # are numbered per generation, so an explicit continuation asks again (on 2026-10-30
+        # a continued run found its earlier refused attempts and never re-asked a recovered Jev).
+        key = "jev:" + content_hash(body)
+        if attempt:
+            key += f":g{self.context.generation}-attempt-{attempt}"
         # A token is at least one byte, so the request size bounds the supplied tokens;
         # Jev's own prompt overhead is added on top.
         tokens = size + JEV_OVERHEAD_TOKENS + JEV_TOKENS_PER_QUESTION * len(questions)
