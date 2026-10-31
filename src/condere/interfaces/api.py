@@ -8,7 +8,6 @@ import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
-from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -20,6 +19,7 @@ from condere.runtime.bundle import render_readme
 from condere.runtime.calculations import Record
 from condere.runtime.chatgpt_plan import USAGE_URL
 from condere.runtime.contracts import IntakeBrief
+from condere.runtime.coordinator import run_recorded
 from condere.runtime.evidence import EvidenceError
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import NotFound, StateError
@@ -33,7 +33,11 @@ class Admission(Record):
     brief: IntakeBrief
 
 
-def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[str, str]):
+def create_app(
+    service: AssessmentService, coordinator, *, owner_tokens: dict[str, str], launcher=None
+):
+    """`launcher(owner, assessment_id, resume)` starts runs elsewhere (one cloud job each);
+    without one, runs execute as tasks in this process."""
     """Credentials come from trusted configuration, never an intake body or a model."""
     if coordinator.service is not service:
         raise ValueError("HTTP and worker execution must use the same assessment service.")
@@ -94,31 +98,18 @@ def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[st
 
     async def execute(owner, assessment_id, resume):
         try:
-            await coordinator.run(owner, assessment_id, resume=resume)
+            await run_recorded(coordinator, service.state, owner, assessment_id, resume=resume)
         except asyncio.CancelledError:
             raise
-        except Exception as error:
-            current = await asyncio.to_thread(service.state.get, owner, assessment_id)
-            if current["status"] != "running":
-                pending, error_types = [error], set()
-                while pending:
-                    item = pending.pop()
-                    if isinstance(item, BaseExceptionGroup):
-                        pending.extend(item.exceptions)
-                    else:
-                        error_types.add(type(item).__name__)
-                await asyncio.to_thread(
-                    service.state.append_record,
-                    owner,
-                    assessment_id,
-                    "execution_error",
-                    str(uuid4()),
-                    {"generation": current["generation"], "error_types": sorted(error_types)},
-                )
+        except Exception:
+            pass  # Recorded on the assessment; the HTTP request that started it has returned.
         finally:
             jobs.pop((owner, assessment_id), None)
 
-    def launch(owner, assessment_id, *, resume=False):
+    async def launch(owner, assessment_id, *, resume=False):
+        if launcher is not None:
+            await launcher(owner, assessment_id, resume)
+            return
         key = (owner, assessment_id)
         if key not in jobs:
             jobs[key] = asyncio.create_task(execute(owner, assessment_id, resume))
@@ -151,7 +142,7 @@ def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[st
             body.brief.model_dump(mode="json"),
         )
         if case["status"] == "admitted":
-            launch(owner, case["id"])
+            await launch(owner, case["id"])
         return case
 
     @app.get(PREFIX)
@@ -184,7 +175,7 @@ def create_app(service: AssessmentService, coordinator, *, owner_tokens: dict[st
     async def continue_assessment(assessment_id: str, owner: Owner):
         case = await asyncio.to_thread(service.state.get, owner, assessment_id)
         if case["status"] != "completed":
-            launch(owner, assessment_id, resume=True)
+            await launch(owner, assessment_id, resume=True)
         return case
 
     @app.get(PREFIX + "/{assessment_id}/report")

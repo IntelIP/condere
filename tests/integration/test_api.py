@@ -264,3 +264,36 @@ async def test_http_start_to_native_result_uses_the_real_coordinator(native_case
         assert report["build_plan"]["option"] == report["decision"]["option"]["value"]
         assert sorted(role for role, _ in calls) == ["code-analyst", "extractor", "lead", "planner"]
         assert service.state.operations(owner, case["id"]) == []
+
+
+@pytest.mark.asyncio
+async def test_http_hands_runs_to_a_launcher_instead_of_running_them(setup_case):
+    service, owner, _ = setup_case
+    campaign = str(uuid4())
+    service.state.authorize_campaign(owner, campaign, 10000, {"basis": "HTTP fixture"})
+    coordinator, launched = GateCoordinator(service), []
+
+    async def launcher(owner_id, assessment_id, resume):
+        launched.append((owner_id, assessment_id, resume))
+
+    app = create_app(service, coordinator, owner_tokens={owner: "a" * 40}, launcher=launcher)
+    body = {
+        "campaign_id": campaign,
+        "request_key": "cloud-job",
+        "brief": {"original_input": "Fictional cloud case."},
+    }
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://condere.test", headers=HEADERS
+        ) as client,
+    ):
+        created = await client.post(PREFIX, json=body)
+        assert created.status_code == 202
+        assessment_id = created.json()["id"]
+        # One job per assessment: the API process itself runs nothing.
+        assert launched == [(owner, assessment_id, False)]
+        assert coordinator.calls == []
+        service.state.stop(owner, assessment_id, cancel=True)
+        assert (await client.post(f"{PREFIX}/{assessment_id}/continue")).status_code == 202
+        assert launched[-1] == (owner, assessment_id, True)

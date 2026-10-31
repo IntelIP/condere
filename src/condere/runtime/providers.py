@@ -9,7 +9,6 @@ import base64
 import ipaddress
 import json
 import re
-import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -88,9 +87,9 @@ CLAUDE_HAIKU = ModelSpec(
 )
 # OpenRouter holds credit for every in-flight request and refuses new ones past it (402), and
 # its admission control refuses bursts (429): on 2026-10-30 ten parallel subagents across two
-# assessments had their first code-analysis calls refused. Wait for a slot instead.
+# assessments had their first code-analysis calls refused. Wait for a slot instead; slots are
+# shared through the database, so the limit holds across one job per assessment.
 OPENROUTER_CONCURRENCY = 4
-_OPENROUTER_SLOTS = threading.BoundedSemaphore(OPENROUTER_CONCURRENCY)
 # The working context Deep Agents may fill before it summarises a conversation (it compacts
 # at 85% of `max_input_tokens`). A 48,000-token target suited the retired one-question
 # workers; for the spin-off lead it triggered summaries at ~26k real tokens. Run 4
@@ -334,7 +333,7 @@ class AccountedChatOpenAI(ChatOpenAI):
                 cost_basis=basis,
             )
 
-        with _OPENROUTER_SLOTS:
+        with context.state.provider_slot("openrouter", OPENROUTER_CONCURRENCY):
             operation = execute_once(
                 context.state,
                 owner=context.owner,
@@ -859,7 +858,6 @@ APIFY_MARGIN = Decimal("1.25")
 # The FREE plan runs at most 5 Actor jobs at once; parallel extractors sent 7 on 2026-10-30
 # and the refused runs stopped the assessment. Wait for a slot before reserving a run.
 APIFY_CONCURRENCY = 4
-_APIFY_SLOTS = threading.BoundedSemaphore(APIFY_CONCURRENCY)
 # A very small maxTotalChargeUsd makes Actors return nothing: a $0.0002 cap on a one-tweet
 # lookup produced an empty run, while $0.01 succeeded (2026-10-30). Never cap below this.
 APIFY_MIN_CHARGE_USD = Decimal("0.01")
@@ -1198,7 +1196,7 @@ class ApifyResearch:
                 ),
             )
 
-        with _APIFY_SLOTS:
+        with self.context.state.provider_slot("apify", APIFY_CONCURRENCY):
             within_assessment_cap(
                 self.context,
                 "apify",

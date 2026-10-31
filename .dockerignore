@@ -1,0 +1,9 @@
+.git
+.venv
+.runtime
+.artifacts
+.claude
+**/__pycache__
+tests
+docs
+scripts

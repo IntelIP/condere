@@ -109,6 +109,11 @@ def test_launch_selects_only_component_credentials_and_rejects_unsafe_origins():
         configuration(without_archive)
     with pytest.raises(ValueError, match="smol or modal"):
         configuration(complete | {"CONDERE_SANDBOX": "other"})
+    assert configuration(complete)["CONDERE_EXECUTOR"] == "inprocess"
+    with pytest.raises(ValueError, match="CONDERE_CLOUD_RUN_JOB"):
+        configuration(complete | {"CONDERE_EXECUTOR": "cloud_run"})
+    with pytest.raises(ValueError, match="inprocess or cloud_run"):
+        configuration(complete | {"CONDERE_EXECUTOR": "other"})
     for url in (
         "http://remote.test",
         "https://user:pass@remote.test",

@@ -52,6 +52,36 @@ from condere.runtime.workers import run_worker
 SMALL_CHARGE_MICROUSD = 250_000
 
 
+async def run_recorded(coordinator, state, owner: str, assessment_id: str, *, resume=False):
+    """Run an assessment; when it stops on an error, save the error types for its status.
+
+    Shared by the in-process API path and the one-job-per-assessment cloud path.
+    """
+    try:
+        await coordinator.run(owner, assessment_id, resume=resume)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        current = await asyncio.to_thread(state.get, owner, assessment_id)
+        if current["status"] != "running":
+            pending, error_types = [error], set()
+            while pending:
+                item = pending.pop()
+                if isinstance(item, BaseExceptionGroup):
+                    pending.extend(item.exceptions)
+                else:
+                    error_types.add(type(item).__name__)
+            await asyncio.to_thread(
+                state.append_record,
+                owner,
+                assessment_id,
+                "execution_error",
+                str(uuid4()),
+                {"generation": current["generation"], "error_types": sorted(error_types)},
+            )
+        raise
+
+
 class AssessmentCoordinator:
     def __init__(
         self,

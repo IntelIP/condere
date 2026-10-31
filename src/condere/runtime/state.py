@@ -7,6 +7,7 @@ All spending transitions lock the campaign before the assessment and operation.
 
 import hashlib
 import json
+import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 from uuid import uuid4
@@ -61,6 +62,10 @@ CREATE TABLE IF NOT EXISTS workers (
 );
 CREATE INDEX IF NOT EXISTS operations_by_assessment ON operations(assessment_id);
 CREATE INDEX IF NOT EXISTS assessments_by_campaign ON assessments(campaign_id);
+CREATE TABLE IF NOT EXISTS provider_slots (
+    holder TEXT PRIMARY KEY, provider TEXT NOT NULL,
+    acquired_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -141,6 +146,43 @@ class AssessmentStore:
                 await connection.execute(
                     "SELECT pg_advisory_unlock(hashtextextended(%s,0))", (key,)
                 )
+
+    @contextmanager
+    def provider_slot(
+        self, provider: str, limit: int, *, stale_seconds: int = 900, poll_seconds: float = 0.5
+    ):
+        """Wait for a place within a provider's account-wide concurrency limit.
+
+        Every process sharing this database counts against the same limit (one Cloud Run Job
+        per assessment). A transaction-scoped lock serializes the check, so it also works
+        through a transaction-mode pooler. A slot left by a lost process expires.
+        """
+        holder = f"{provider}:{uuid4()}"
+        while True:
+            with self.connection() as connection:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("slots:" + provider,)
+                )
+                connection.execute(
+                    "DELETE FROM provider_slots WHERE provider=%s "
+                    "AND acquired_at < now() - make_interval(secs => %s)",
+                    (provider, stale_seconds),
+                )
+                held = connection.execute(
+                    "SELECT count(*) AS held FROM provider_slots WHERE provider=%s", (provider,)
+                ).fetchone()["held"]
+                if held < limit:
+                    connection.execute(
+                        "INSERT INTO provider_slots (holder, provider) VALUES (%s, %s)",
+                        (holder, provider),
+                    )
+                    break
+            time.sleep(poll_seconds)
+        try:
+            yield
+        finally:
+            with self.connection() as connection:
+                connection.execute("DELETE FROM provider_slots WHERE holder=%s", (holder,))
 
     def setup(self) -> None:
         with psycopg.connect(self._direct_dsn, row_factory=dict_row) as connection:

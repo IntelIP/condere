@@ -3,6 +3,8 @@
 import asyncio
 import multiprocessing
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 from uuid import uuid4
@@ -510,3 +512,30 @@ def test_small_held_calls_close_at_their_full_reservation(store):
     assert (small["state"], small["actual_microusd"]) == ("failed", 63_000)
     states = {item["operation_key"]: item["state"] for item in store.operations(owner, case["id"])}
     assert states == {"small": "failed", "large": "uncertain"}  # Larger calls still need review.
+
+
+def test_provider_slots_are_shared_across_processes_and_expire(store):
+    other = AssessmentStore(os.environ["CONDERE_DATABASE_URL"])  # stands in for another job
+    provider = "test-provider-" + uuid4().hex
+    entered = threading.Event()
+    with store.provider_slot(provider, 1):
+
+        def wait_for_slot():
+            with other.provider_slot(provider, 1, poll_seconds=0.05):
+                entered.set()
+
+        waiter = threading.Thread(target=wait_for_slot)
+        waiter.start()
+        time.sleep(0.5)
+        assert not entered.is_set()  # the limit holds across separate stores
+    waiter.join(timeout=5)
+    assert entered.is_set()
+    # A slot left by a lost process expires instead of blocking the provider forever.
+    with store.connection() as connection:
+        connection.execute(
+            "INSERT INTO provider_slots (holder, provider, acquired_at) "
+            "VALUES (%s, %s, now() - interval '1 hour')",
+            (provider + ":lost", provider),
+        )
+    with other.provider_slot(provider, 1, poll_seconds=0.05):
+        pass

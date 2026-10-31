@@ -1,4 +1,4 @@
-"""Installed local HTTP service; configuration alone never admits paid research."""
+"""Condere HTTP service, local or on Cloud Run; configuration alone never admits research."""
 
 import asyncio
 import hashlib
@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import uvicorn
 
+from condere.infra.cloud_run import CloudRunJobs
 from condere.interfaces.api import create_app
 from condere.interfaces.mcp import validate_api_url
 from condere.runtime.chatgpt_plan import DEFAULT_HOME, PLAN_CODE_MODEL, PlanCredentials
@@ -51,6 +52,9 @@ SANDBOX = ("CONDERE_SANDBOX", "CONDERE_SMOL_IMAGE")
 # Behind a transaction-mode pooler, CONDERE_DATABASE_DIRECT_URL is the same database's direct
 # endpoint, for the coordinator's session lock and schema setup.
 DATABASE = ("CONDERE_DATABASE_DIRECT_URL",)
+# Where runs execute: CONDERE_EXECUTOR=inprocess (default) or cloud_run, which starts the job
+# named by CONDERE_CLOUD_RUN_JOB (projects/<project>/locations/<region>/jobs/<job>) per run.
+EXECUTOR = ("CONDERE_EXECUTOR", "CONDERE_CLOUD_RUN_JOB")
 # Trace destination: LANGSMITH_PROJECT, or LANGSMITH_AGENT_ID with LANGSMITH_AGENT_ENVIRONMENT.
 TRACING = (
     "LANGSMITH_PROJECT",
@@ -88,7 +92,7 @@ def configuration(environment) -> dict[str, str]:
     values = {name: environment[name] for name in REQUIRED}
     values |= {
         name: environment[name]
-        for name in TRACING + PROVIDER + SANDBOX + DATABASE
+        for name in TRACING + PROVIDER + SANDBOX + DATABASE + EXECUTOR
         if environment.get(name)
     }
     provider = values.setdefault("CONDERE_MODEL_PROVIDER", "chatgpt")
@@ -107,6 +111,11 @@ def configuration(environment) -> dict[str, str]:
         values["CONDERE_SMOL_IMAGE"] = verified_image(values["CONDERE_SMOL_IMAGE"])
     elif sandbox != "modal":
         raise ValueError("CONDERE_SANDBOX must be smol or modal.")
+    executor = values.setdefault("CONDERE_EXECUTOR", "inprocess")
+    if executor not in {"inprocess", "cloud_run"}:
+        raise ValueError("CONDERE_EXECUTOR must be inprocess or cloud_run.")
+    if executor == "cloud_run" and not values.get("CONDERE_CLOUD_RUN_JOB"):
+        raise ValueError("Missing Condere runtime configuration: CONDERE_CLOUD_RUN_JOB")
     return values
 
 
@@ -118,8 +127,11 @@ def sandbox_backend(values: dict) -> tuple[type, str]:
     return ModalSandbox, manifest["base_image"]
 
 
-def build_app():
-    values = configuration(os.environ)
+def build_runtime(values: dict):
+    """The service and coordinator, shared by the API and the per-assessment job.
+
+    Returns (service, coordinator, object client, tracing); the caller closes the last two.
+    """
     state = AssessmentStore(
         values["CONDERE_DATABASE_URL"], direct_dsn=values.get("CONDERE_DATABASE_DIRECT_URL")
     )
@@ -157,17 +169,34 @@ def build_app():
             github_token=values.get("GITHUB_TOKEN"),
             tracing=tracing,
         )
+    except BaseException:
+        objects.close()
+        if tracing is not None:
+            tracing.close()
+        raise
+    return service, coordinator, objects, tracing
+
+
+def build_app():
+    values = configuration(os.environ)
+    service, coordinator, objects, tracing = build_runtime(values)
+    launcher = (
+        CloudRunJobs(values["CONDERE_CLOUD_RUN_JOB"])
+        if values["CONDERE_EXECUTOR"] == "cloud_run"
+        else None
+    )
+    try:
         app = create_app(
             service,
             coordinator,
             owner_tokens={
                 values["CONDERE_OWNER_ID"]: values["CONDERE_API_TOKEN"],
             },
+            launcher=launcher,
         )
     except BaseException:
         objects.close()
-        if tracing is not None:
-            tracing.close()
+        tracing.close()
         raise
 
     application_lifespan = app.router.lifespan_context
@@ -180,6 +209,8 @@ def build_app():
         finally:
             objects.close()
             await asyncio.to_thread(tracing.close)
+            if launcher is not None:
+                await launcher.close()
 
     app.router.lifespan_context = lifespan
     return app
@@ -190,6 +221,9 @@ def main() -> None:
         values = configuration(os.environ)
     except ValueError as error:
         raise SystemExit(str(error)) from None
+    if port := os.environ.get("PORT"):  # Cloud Run sets the port; TLS ends at its front end.
+        uvicorn.run(build_app, factory=True, host="0.0.0.0", port=int(port), access_log=False)
+        return
     origin = urlsplit(values["CONDERE_API_URL"])
     if origin.scheme != "http" or origin.hostname != "127.0.0.1" or not origin.port:
         raise SystemExit("The local launcher requires http://127.0.0.1:<port>.")
