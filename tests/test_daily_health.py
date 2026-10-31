@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from condere.jobs.daily_health import findings, provider_usage, report
+from condere.jobs.daily_health import findings, provider_usage, report, summary
 
 NOW = datetime(2026, 10, 31, 13, 7, tzinfo=UTC)
 SINCE = NOW - timedelta(days=1)
@@ -111,3 +111,11 @@ def test_provider_usage_reads_accounts_and_never_reports_the_key():
 def test_apify_near_its_monthly_limit_is_a_finding():
     usage = {"apify": {"month_usage_usd": 4.1, "month_limit_usd": 5.0, "cycle_ends": "x"}}
     assert kinds(findings(snapshot(), usage, NOW, SINCE)) == ["provider_limit"]
+
+
+def test_summary_names_each_finding_for_the_alert_email():
+    usage = {"apify": {"month_usage_usd": 30.16, "month_limit_usd": 30.0, "cycle_ends": "x"}}
+    lost = run("lost", "running", started_minutes_ago=90)
+    found = findings(snapshot([lost]), usage, NOW, SINCE)
+    assert summary(found) == "2 finding(s): stranded (lost), provider_limit (apify)"
+    assert summary([]) == "no findings"

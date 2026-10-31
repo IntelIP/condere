@@ -135,6 +135,17 @@ def findings(snapshot: dict, usage: dict, now: datetime, since: datetime) -> lis
     return found
 
 
+def summary(found: list[dict]) -> str:
+    """One line for the alert email; the report holds the detail."""
+    if not found:
+        return "no findings"
+    names = ", ".join(
+        f"{item['kind']} ({item.get('provider') or item.get('assessment') or 'month'})"
+        for item in found
+    )
+    return f"{len(found)} finding(s): {names}"
+
+
 def report(snapshot: dict, usage: dict, now: datetime, since: datetime) -> dict:
     rows = snapshot["assessments"]
     completed = [row for row in rows if row["status"] == "completed" and row["updated_at"] >= since]
@@ -198,6 +209,7 @@ def main() -> None:
             {
                 "severity": "WARNING" if result["findings"] else "INFO",
                 "message": "condere daily health",
+                "summary": summary(result["findings"]),
                 "report": result,
             },
             sort_keys=True,
