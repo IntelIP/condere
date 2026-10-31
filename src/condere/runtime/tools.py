@@ -22,7 +22,7 @@ from condere.runtime.evidence import EvidenceError, SourceDocument
 from condere.runtime.indexing import pinned_snapshot
 from condere.runtime.providers import ApifyResearch, CommunityResearch, ExaResearch
 from condere.runtime.repositories import canonical_repository, stage_repository
-from condere.runtime.sandbox import SmolSandbox
+from condere.runtime.sandbox import CodeSandbox
 from condere.runtime.service import AssessmentService
 from condere.runtime.spinoff import Analysis, BuildPlan, ExtractedClaim
 from condere.runtime.state import Conflict, NotFound, content_hash
@@ -75,7 +75,7 @@ def worker_tools(
     generation: int,
     worker_id: str,
     research: ExaResearch | None,
-    sandbox: SmolSandbox,
+    sandbox: CodeSandbox,
     repository_cache: Path,
     allowed_repositories: set[str],
     social: ApifyResearch | None = None,

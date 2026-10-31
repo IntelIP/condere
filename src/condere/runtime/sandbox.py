@@ -1,4 +1,9 @@
-"""Deep Agents sandbox backed only by SmolVM's local engine."""
+"""Deep Agents sandboxes for untrusted repository code: SmolVM locally, Modal in the cloud.
+
+Both backends share one contract (`CodeSandbox`): an offline machine with /workspace, bounded
+command output, transfers confined to /workspace and /tmp, and trusted transfers for the
+archives and indexes the runtime itself verified.
+"""
 
 import base64
 import json
@@ -7,10 +12,13 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 from deepagents.backends.protocol import ExecuteResponse, FileDownloadResponse, FileUploadResponse
 from deepagents.backends.sandbox import BaseSandbox
 from smol import ConnectOptions, ExecOptions, Machine, MachineConfig, ResourceSpec
+
+MACHINE_NAME = re.compile(r"condere-[a-z0-9-]{1,60}")
 
 _READ_FILE = """
 import base64, json, os, pathlib, stat, sys
@@ -42,6 +50,39 @@ class SandboxResult(ExecuteResponse):
     artifact_path: str | None = None
 
 
+class CodeSandbox(Protocol):
+    """What the runtime needs from a sandbox backend."""
+
+    @property
+    def id(self) -> str: ...
+
+    def execute(self, command: str, *, timeout: int | None = None) -> SandboxResult: ...
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]: ...
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]: ...
+
+    def write_trusted(self, path: str, content: bytes) -> None: ...
+
+    def read_trusted(self, path: str) -> bytes: ...
+
+    def close(self, *, delete: bool = False) -> None: ...
+
+
+def transfer_path(path: str) -> PurePosixPath:
+    parsed = PurePosixPath(path)
+    if (
+        "\x00" in path
+        or ".." in parsed.parts
+        or not any(
+            parsed.is_relative_to(root) and parsed != PurePosixPath(root)
+            for root in ("/workspace", "/tmp")
+        )
+    ):
+        raise ValueError("Transfers must stay within /workspace or /tmp.")
+    return parsed
+
+
 class SmolSandbox(BaseSandbox):
     def __init__(
         self,
@@ -61,7 +102,7 @@ class SmolSandbox(BaseSandbox):
 
     @classmethod
     def create(cls, name: str, image: str, artifact_dir: Path, **kwargs) -> "SmolSandbox":
-        if not re.fullmatch(r"condere-[a-z0-9-]{1,60}", name):
+        if not MACHINE_NAME.fullmatch(name):
             raise ValueError("Machine name must be a task-owned Condere identifier.")
         machine = Machine.create(
             MachineConfig(
@@ -87,9 +128,18 @@ class SmolSandbox(BaseSandbox):
 
     @classmethod
     def reconnect(cls, name: str, artifact_dir: Path, **kwargs) -> "SmolSandbox":
-        if not re.fullmatch(r"condere-[a-z0-9-]{1,60}", name):
+        if not MACHINE_NAME.fullmatch(name):
             raise ValueError("Invalid Condere machine identifier.")
         return cls(Machine.connect(name, ConnectOptions(target="local")), artifact_dir, **kwargs)
+
+    @staticmethod
+    def running(prefix: str) -> list[str]:
+        """Names of this backend's machines that are still running."""
+        return [
+            machine.id
+            for machine in Machine.list(ConnectOptions(target="local"))
+            if machine.id.startswith(prefix) and machine.state not in {"stopped", "exited"}
+        ]
 
     @property
     def id(self) -> str:
@@ -140,19 +190,14 @@ class SmolSandbox(BaseSandbox):
             artifact_path=str(artifact),
         )
 
-    @staticmethod
-    def _path(path: str) -> PurePosixPath:
-        parsed = PurePosixPath(path)
-        if (
-            "\x00" in path
-            or ".." in parsed.parts
-            or not any(
-                parsed.is_relative_to(root) and parsed != PurePosixPath(root)
-                for root in ("/workspace", "/tmp")
-            )
-        ):
-            raise ValueError("Transfers must stay within /workspace or /tmp.")
-        return parsed
+    _path = staticmethod(transfer_path)
+
+    def write_trusted(self, path: str, content: bytes) -> None:
+        """Write runtime-verified content (archives, indexes) without the agent file limit."""
+        self.machine.write_file(str(transfer_path(path)), content)
+
+    def read_trusted(self, path: str) -> bytes:
+        return self.machine.read_file(str(transfer_path(path)))
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         results = []

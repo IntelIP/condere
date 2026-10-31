@@ -10,7 +10,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
-from smol import ConnectOptions, Machine
 
 from condere.runtime.chatgpt_plan import (
     PLAN_CODE_MODEL,
@@ -67,6 +66,7 @@ class AssessmentCoordinator:
         exa_key: str | None = None,
         apify_token: str | None = None,
         github_token: str | None = None,
+        sandboxes=SmolSandbox,
         model_factory=None,
         decision_factory=None,
         callbacks: list | None = None,
@@ -92,6 +92,9 @@ class AssessmentCoordinator:
         self.artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._router_key, self._exa_key, self._apify_token = openrouter_key, exa_key, apify_token
         self._github_token = github_token
+        # The sandbox backend class: SmolSandbox locally, ModalSandbox in the cloud. `image` is
+        # that backend's image reference (a SmolVM archive, or the Modal base image).
+        self.sandboxes = sandboxes
         self._decision_factory = decision_factory
         # ChatGPT plan usage takes precedence when the operator signed in for it.
         self.plan_credentials = plan_credentials
@@ -163,23 +166,17 @@ class AssessmentCoordinator:
     async def _stop_machines(self, owner, assessment_id):
         workers = await asyncio.to_thread(self.state.workers, owner, assessment_id)
         names = {worker["machine_id"] or self.machine_name(worker): worker for worker in workers}
-        machines = await asyncio.to_thread(Machine.list, ConnectOptions(target="local"))
-        for machine in machines:
-            index_machine = re.fullmatch(
-                rf"condere-index-{re.escape(assessment_id)}-[0-9]+", machine.id
-            )
-            if (machine.id not in names and not index_machine) or machine.state in {
-                "stopped",
-                "exited",
-            }:
+        for name in await asyncio.to_thread(self.sandboxes.running, "condere-"):
+            index_machine = re.fullmatch(rf"condere-index-{re.escape(assessment_id)}-[0-9]+", name)
+            if name not in names and not index_machine:
                 continue
             artifact = (
-                names[machine.id]["id"]
-                if machine.id in names
-                else machine.id.split("-")[1] + "-" + machine.id.rsplit("-", 1)[1]
+                names[name]["id"]
+                if name in names
+                else name.split("-")[1] + "-" + name.rsplit("-", 1)[1]
             )
             sandbox = await asyncio.to_thread(
-                SmolSandbox.reconnect, machine.id, self.artifacts / assessment_id / artifact
+                self.sandboxes.reconnect, name, self.artifacts / assessment_id / artifact
             )
             await asyncio.to_thread(sandbox.close)
 
@@ -406,7 +403,7 @@ class AssessmentCoordinator:
             return
         creation = asyncio.create_task(
             asyncio.to_thread(
-                SmolSandbox.create,
+                self.sandboxes.create,
                 f"condere-index-{assessment_id}-{generation}",
                 self.image,
                 self.artifacts / assessment_id / f"index-{generation}",
@@ -470,7 +467,7 @@ class AssessmentCoordinator:
         )
         creation = asyncio.create_task(
             asyncio.to_thread(
-                SmolSandbox.create, self.machine_name(worker), self.image, artifact_dir
+                self.sandboxes.create, self.machine_name(worker), self.image, artifact_dir
             )
         )
         try:

@@ -14,10 +14,10 @@ from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import Field
+from sandbox_backends import Sandbox, image, modal_only, smol_only
 
 from condere.runtime.agent import build_agent
 from condere.runtime.repositories import acquire_repository, stage_repository
-from condere.runtime.sandbox import SmolSandbox
 
 pytestmark = [
     pytest.mark.integration,
@@ -29,8 +29,7 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def sandboxes(tmp_path_factory):
-    image = os.environ["CONDERE_SMOL_IMAGE"]
-    directory = tmp_path_factory.mktemp("smolvm")
+    directory = tmp_path_factory.mktemp("sandbox")
     created = []
     environment = pytest.MonkeyPatch()
     for key in ("OPENROUTER_API_KEY", "EXA_API_KEY", "DOPPLER_TOKEN", "SMOL_CLOUD_TOKEN"):
@@ -38,7 +37,7 @@ def sandboxes(tmp_path_factory):
     try:
         for suffix in ("a", "b"):
             name = f"condere-test-{uuid.uuid4().hex[:12]}-{suffix}"
-            created.append(SmolSandbox.create(name, image, directory / suffix))
+            created.append(Sandbox.create(name, image(), directory / suffix))
         yield created
     finally:
         for sandbox in created:
@@ -110,6 +109,7 @@ def test_output_is_bounded_and_retained(sandboxes):
         sandbox.output_limit = previous_limit
 
 
+@smol_only
 async def test_async_execution_and_explicit_cancellation(sandboxes):
     sandbox = sandboxes[0]
     pending = asyncio.create_task(sandbox.aexecute("sleep 60; echo unexpected", timeout=70))
@@ -124,11 +124,25 @@ async def test_async_execution_and_explicit_cancellation(sandboxes):
     assert "unexpected" not in result.output
 
 
+@modal_only
+def test_modal_cancellation_finds_reconnects_and_terminates_the_sandbox(sandboxes):
+    """The coordinator's cancel path: list running sandboxes, reconnect by name, terminate."""
+    sandbox = sandboxes[1]
+    assert sandbox.upload_files([("/workspace/saved.txt", b"survives")])[0].error is None
+    assert sandbox.id in Sandbox.running("condere-test-")
+    resumed = Sandbox.reconnect(sandbox.id, sandbox.artifact_dir)
+    assert resumed.download_files(["/workspace/saved.txt"])[0].content == b"survives"
+    resumed.close()
+    sandboxes.pop()
+    assert sandbox.id not in Sandbox.running("condere-test-")
+
+
+@smol_only
 def test_reconnect_and_deletion_preserve_export(sandboxes, tmp_path):
     sandbox = sandboxes[1]
     assert sandbox.upload_files([("/workspace/saved.txt", b"survives")])[0].error is None
     sandbox.close()
-    resumed = SmolSandbox.reconnect(sandbox.id, sandbox.artifact_dir)
+    resumed = Sandbox.reconnect(sandbox.id, sandbox.artifact_dir)
     sandboxes[1] = resumed
     data = resumed.download_files(["/workspace/saved.txt"])[0].content
     assert data == b"survives"
@@ -268,7 +282,7 @@ def test_admitted_repository_exact_commit_survives_vm_deletion(sandboxes):
     assert result.exit_code == 0
     assert result.output.strip() == original["sha256"]
     # An agent may inspect the same snapshot twice after modifying its first working copy.
-    sandbox.machine.write_file(staged["path"] + "/README.md", b"Changed first working copy")
+    sandbox.write_trusted(staged["path"] + "/README.md", b"Changed first working copy")
     repeated = stage_repository(snapshot, sandbox)
     assert repeated["path"] != staged["path"]
     reread = sandbox.download_files([repeated["path"] + "/README.md"])[0]
@@ -281,7 +295,7 @@ def test_admitted_repository_exact_commit_survives_vm_deletion(sandboxes):
         **staged,
         "readme_sha256": original["sha256"],
         "archive_survives_vm_deletion": True,
-        "image": os.environ["CONDERE_SMOL_IMAGE"],
+        "image": image(),
         "model_invoked": False,
     }
     (destination / "live-inspection.json").write_text(json.dumps(record, indent=2) + "\n")

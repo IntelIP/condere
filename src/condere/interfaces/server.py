@@ -17,6 +17,8 @@ from condere.runtime.chatgpt_plan import DEFAULT_HOME, PLAN_CODE_MODEL, PlanCred
 from condere.runtime.coordinator import AssessmentCoordinator
 from condere.runtime.evidence import EvidenceStore, object_client
 from condere.runtime.providers import CLAUDE_OPUS
+from condere.runtime.sandbox import SmolSandbox
+from condere.runtime.sandbox_modal import ModalSandbox
 from condere.runtime.service import AssessmentService
 from condere.runtime.state import AssessmentStore
 from condere.runtime.tracing import Tracing
@@ -34,7 +36,6 @@ REQUIRED = (
     "CONDERE_EVIDENCE_ACCESS_KEY",
     "CONDERE_EVIDENCE_SECRET_KEY",
     "CONDERE_EVIDENCE_BUCKET",
-    "CONDERE_SMOL_IMAGE",
     "CONDERE_ARTIFACT_DIRECTORY",
     "EXA_API_KEY",
     "LANGSMITH_API_KEY",
@@ -43,7 +44,10 @@ REQUIRED = (
 )
 # Lead and planner billing: CONDERE_MODEL_PROVIDER=chatgpt (default, the operator's ChatGPT
 # plan via Sign in with ChatGPT) or openrouter. APIFY_TOKEN enables X, Reddit and YouTube.
-PROVIDER = ("CONDERE_MODEL_PROVIDER", "CONDERE_CHATGPT_HOME", "APIFY_TOKEN")
+PROVIDER = ("CONDERE_MODEL_PROVIDER", "CONDERE_CHATGPT_HOME", "APIFY_TOKEN", "GITHUB_TOKEN")
+# Code sandbox: CONDERE_SANDBOX=smol (default, local SmolVM with CONDERE_SMOL_IMAGE) or modal
+# (Modal credentials from MODAL_TOKEN_ID and MODAL_TOKEN_SECRET or the local Modal profile).
+SANDBOX = ("CONDERE_SANDBOX", "CONDERE_SMOL_IMAGE")
 # Trace destination: LANGSMITH_PROJECT, or LANGSMITH_AGENT_ID with LANGSMITH_AGENT_ENVIRONMENT.
 TRACING = (
     "LANGSMITH_PROJECT",
@@ -79,7 +83,9 @@ def configuration(environment) -> dict[str, str]:
     if missing:
         raise ValueError("Missing Condere runtime configuration: " + ", ".join(missing))
     values = {name: environment[name] for name in REQUIRED}
-    values |= {name: environment[name] for name in TRACING + PROVIDER if environment.get(name)}
+    values |= {
+        name: environment[name] for name in TRACING + PROVIDER + SANDBOX if environment.get(name)
+    }
     provider = values.setdefault("CONDERE_MODEL_PROVIDER", "chatgpt")
     if provider not in {"chatgpt", "openrouter"}:
         raise ValueError("CONDERE_MODEL_PROVIDER must be chatgpt or openrouter.")
@@ -89,8 +95,22 @@ def configuration(environment) -> dict[str, str]:
     token = values["CONDERE_API_TOKEN"]
     if len(token) < 32 or any(char.isspace() for char in token):
         raise ValueError("Configure a bearer token with at least 32 non-whitespace characters.")
-    values["CONDERE_SMOL_IMAGE"] = verified_image(values["CONDERE_SMOL_IMAGE"])
+    sandbox = values.setdefault("CONDERE_SANDBOX", "smol")
+    if sandbox == "smol":
+        if not values.get("CONDERE_SMOL_IMAGE"):
+            raise ValueError("Missing Condere runtime configuration: CONDERE_SMOL_IMAGE")
+        values["CONDERE_SMOL_IMAGE"] = verified_image(values["CONDERE_SMOL_IMAGE"])
+    elif sandbox != "modal":
+        raise ValueError("CONDERE_SANDBOX must be smol or modal.")
     return values
+
+
+def sandbox_backend(values: dict) -> tuple[type, str]:
+    """The sandbox class and its image reference."""
+    if values["CONDERE_SANDBOX"] == "smol":
+        return SmolSandbox, values["CONDERE_SMOL_IMAGE"]
+    manifest = json.loads((REPOSITORY / "infra/smolvm/inspection-image.json").read_text())
+    return ModalSandbox, manifest["base_image"]
 
 
 def build_app():
@@ -115,11 +135,13 @@ def build_app():
                 raise ValueError(
                     "Sign in with ChatGPT first: uv run python scripts/chatgpt_login.py"
                 )
+        sandboxes, image = sandbox_backend(values)
         coordinator = AssessmentCoordinator(
             service,
             checkpoint_dsn=values["CONDERE_CHECKPOINT_URL"],
             application_dsn=values["CONDERE_DATABASE_URL"],
-            image=values["CONDERE_SMOL_IMAGE"],
+            image=image,
+            sandboxes=sandboxes,
             artifacts=Path(values["CONDERE_ARTIFACT_DIRECTORY"]),
             openrouter_key=values["CONDERE_OPENROUTER_API_KEY"],
             plan_credentials=plan,

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import httpx
 
-from condere.runtime.sandbox import SmolSandbox
+from condere.runtime.sandbox import CodeSandbox
 
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_SOURCE_BYTES = 128 * 1024 * 1024
@@ -179,8 +179,8 @@ def acquire_repository(
             client.close()
 
 
-def stage_repository(snapshot: RepositorySnapshot, sandbox: SmolSandbox) -> dict:
-    """Transfer the verified archive and unpack only inside the already isolated VM."""
+def stage_repository(snapshot: RepositorySnapshot, sandbox: CodeSandbox) -> dict:
+    """Transfer the verified archive and unpack only inside the already isolated sandbox."""
     if (
         snapshot.archive.stat().st_size > MAX_ARCHIVE_BYTES
         or _file_hash(snapshot.archive) != snapshot.archive_sha256
@@ -190,7 +190,7 @@ def stage_repository(snapshot: RepositorySnapshot, sandbox: SmolSandbox) -> dict
     # Repeated inspection must not reuse a workspace that untrusted code could have changed.
     guest_directory = f"/workspace/repositories/{snapshot.identity}-{uuid4().hex}"
     # Trusted acquisition uses its own bound; agent file tools retain their smaller limit.
-    sandbox.machine.write_file(guest_archive, snapshot.archive.read_bytes())
+    sandbox.write_trusted(guest_archive, snapshot.archive.read_bytes())
     script = """
 import json, pathlib, tarfile, sys
 destination = pathlib.Path(sys.argv[2])
@@ -213,7 +213,9 @@ print(json.dumps({'path': str(roots[0]), 'skipped_links': skipped}))
     )
     response = sandbox.execute(command)
     if response.exit_code != 0:
-        raise RuntimeError("Repository extraction failed inside SmolVM; no host fallback was used.")
+        raise RuntimeError(
+            "Repository extraction failed inside the sandbox; no host fallback was used."
+        )
     return {
         **json.loads(response.output),
         "repository": snapshot.repository,

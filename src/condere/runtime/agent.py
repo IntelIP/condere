@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from condere.runtime.operations import ProviderRefused, ProviderUncertain
 from condere.runtime.providers import CLAUDE_OPUS, WORKING_CONTEXT_TOKENS
-from condere.runtime.sandbox import SmolSandbox
+from condere.runtime.sandbox import CodeSandbox
 from condere.runtime.spinoff import ClaimBatch
 
 METHODS_ROOT = Path(__file__).resolve().parents[3] / "agent"
@@ -86,7 +86,7 @@ def code_method_version(root: Path = METHODS_ROOT, model_id: str = CLAUDE_OPUS.i
 
 def build_agent(
     model: BaseChatModel,
-    sandbox: SmolSandbox,
+    sandbox: CodeSandbox,
     *,
     assignment: str,
     skills: list[str] | None = None,
@@ -293,7 +293,7 @@ def _subagent_summary(model: BaseChatModel, backend) -> SummarizationMiddleware:
 
 def build_lead_agent(
     model: BaseChatModel,
-    sandbox: SmolSandbox,
+    sandbox: CodeSandbox,
     *,
     assignment: str,
     skills: list[str],

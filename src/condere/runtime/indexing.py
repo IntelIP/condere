@@ -20,7 +20,7 @@ from condere.runtime.repositories import (
     canonical_repository,
     stage_repository,
 )
-from condere.runtime.sandbox import SmolSandbox
+from condere.runtime.sandbox import CodeSandbox
 from condere.runtime.state import AssessmentStore, Conflict, content_hash
 
 INDEXER = Path(__file__).with_name("index_repository.py")
@@ -78,11 +78,11 @@ def workspace_path(snapshot: RepositorySnapshot) -> str:
     return f"/workspace/index/{snapshot.identity}"
 
 
-def build_index(snapshot: RepositorySnapshot, sandbox: SmolSandbox) -> dict[str, bytes]:
+def build_index(snapshot: RepositorySnapshot, sandbox: CodeSandbox) -> dict[str, bytes]:
     """Run the indexer inside an offline VM and return its output files."""
     staged = stage_repository(snapshot, sandbox)
     script = "/workspace/indexer.py"
-    sandbox.machine.write_file(script, INDEXER.read_bytes())
+    sandbox.write_trusted(script, INDEXER.read_bytes())
     output = f"/workspace/index-output/{snapshot.identity}"
     command = " ".join(
         shlex.quote(item)
@@ -97,7 +97,9 @@ def build_index(snapshot: RepositorySnapshot, sandbox: SmolSandbox) -> dict[str,
     )
     response = sandbox.execute(command, timeout=300)
     if response.exit_code != 0:
-        raise RuntimeError("Repository indexing failed inside SmolVM: " + response.output[-800:])
+        raise RuntimeError(
+            "Repository indexing failed inside the sandbox: " + response.output[-800:]
+        )
     files = {}
     for name in INDEX_FILES:
         path = f"{output}/{name}"
@@ -106,7 +108,7 @@ def build_index(snapshot: RepositorySnapshot, sandbox: SmolSandbox) -> dict[str,
             continue
         if int(size.output.strip()) > MAX_INDEX_FILE_BYTES:
             raise RuntimeError(f"Index output {name} exceeds its size bound.")
-        files[name] = sandbox.machine.read_file(path)
+        files[name] = sandbox.read_trusted(path)
     if "facts.json" not in files or "report.md" not in files:
         raise RuntimeError("Repository indexing produced no facts or report.")
     return files
@@ -246,4 +248,4 @@ def install_index(evidence: EvidenceStore, owner: str, assessment_id: str, recor
     if prepared.exit_code != 0:
         raise RuntimeError("Cannot prepare the repository index directory in the sandbox.")
     for name, data in files.items():
-        sandbox.machine.write_file(f"{record['workspace_path']}/{name}", data)
+        sandbox.write_trusted(f"{record['workspace_path']}/{name}", data)

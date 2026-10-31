@@ -14,7 +14,7 @@ from condere.runtime.providers import (
     CommunityResearch,
     ExaResearch,
 )
-from condere.runtime.sandbox import SmolSandbox
+from condere.runtime.sandbox import CodeSandbox
 from condere.runtime.service import AssessmentService, output_keys
 from condere.runtime.state import Conflict
 from condere.runtime.tools import worker_tools
@@ -27,7 +27,7 @@ async def run_worker(
     assessment_id: str,
     generation: int,
     role: str,
-    sandbox: SmolSandbox,
+    sandbox: CodeSandbox,
     model: BaseChatModel,
     checkpointer,
     research: ExaResearch | None,

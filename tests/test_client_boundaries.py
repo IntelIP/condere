@@ -97,6 +97,16 @@ def test_launch_selects_only_component_credentials_and_rejects_unsafe_origins():
     assert configuration(complete)["CONDERE_MODEL_PROVIDER"] == "chatgpt"
     with pytest.raises(ValueError, match="chatgpt or openrouter"):
         configuration(complete | {"CONDERE_MODEL_PROVIDER": "other"})
+    assert configuration(complete)["CONDERE_SANDBOX"] == "smol"
+    # Modal builds the inspection image itself, so it needs no local SmolVM archive.
+    without_archive = {k: v for k, v in complete.items() if k != "CONDERE_SMOL_IMAGE"}
+    assert configuration(without_archive | {"CONDERE_SANDBOX": "modal"})["CONDERE_SANDBOX"] == (
+        "modal"
+    )
+    with pytest.raises(ValueError, match="CONDERE_SMOL_IMAGE"):
+        configuration(without_archive)
+    with pytest.raises(ValueError, match="smol or modal"):
+        configuration(complete | {"CONDERE_SANDBOX": "other"})
     for url in (
         "http://remote.test",
         "https://user:pass@remote.test",

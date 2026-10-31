@@ -5,9 +5,9 @@ import os
 from uuid import uuid4
 
 import pytest
+from sandbox_backends import Sandbox, image
 
 from condere.runtime.agent import method_files
-from condere.runtime.sandbox import SmolSandbox
 
 pytestmark = [
     pytest.mark.integration,
@@ -18,9 +18,7 @@ pytestmark = [
 
 
 def test_graph_navigation_and_cache(tmp_path):
-    sandbox = SmolSandbox.create(
-        "condere-toolkit-" + uuid4().hex[:16], os.environ["CONDERE_SMOL_IMAGE"], tmp_path
-    )
+    sandbox = Sandbox.create("condere-toolkit-" + uuid4().hex[:16], image(), tmp_path)
     try:
         files = method_files()
         files["/workspace/repository/src/app.py"] = (
@@ -84,9 +82,7 @@ def test_repository_index_extracts_deployment_facts_and_a_queryable_graph(tmp_pa
         hashlib.sha256(archive.read_bytes()).hexdigest(),
         _manifest(archive),
     )
-    sandbox = SmolSandbox.create(
-        "condere-index-test-" + uuid4().hex[:12], os.environ["CONDERE_SMOL_IMAGE"], tmp_path
-    )
+    sandbox = Sandbox.create("condere-index-test-" + uuid4().hex[:12], image(), tmp_path)
     try:
         files = build_index(snapshot, sandbox)
         facts = json.loads(files["facts.json"])
@@ -107,7 +103,7 @@ def test_repository_index_extracts_deployment_facts_and_a_queryable_graph(tmp_pa
         assert "ports 8080" in report
         installed = "/workspace/index/fixture"
         assert sandbox.execute(f"mkdir -p {installed}").exit_code == 0
-        sandbox.machine.write_file(f"{installed}/graph.json", files["graph.json"])
+        sandbox.write_trusted(f"{installed}/graph.json", files["graph.json"])
         query = sandbox.execute(
             f"graphify query 'main save' --graph {installed}/graph.json --budget 400"
         )
