@@ -196,3 +196,26 @@ def test_cloud_storage_and_pooled_database_settings():
     # The coordinator's session lock and schema setup bypass a transaction-mode pooler.
     assert AssessmentStore(pooled, direct_dsn=direct)._direct_dsn == direct
     assert AssessmentStore(pooled)._direct_dsn == pooled
+
+
+async def test_private_deployment_receives_both_identity_and_api_token(tmp_path):
+    seen = []
+
+    def respond(request):
+        seen.append(request.headers)
+        return httpx.Response(200, json={"agent_id": "condere"})
+
+    client = AssessmentClient(
+        "https://condere-agent-0.us-east1.run.app",
+        "a" * 40,
+        tmp_path,
+        identity=lambda: "google-identity-token",
+        transport=httpx.MockTransport(respond),
+    )
+    try:
+        await client.request("GET", "/capabilities")
+    finally:
+        await client.http.aclose()
+    # Cloud Run checks the Google identity; the API still checks its own token.
+    assert seen[0]["X-Serverless-Authorization"] == "Bearer google-identity-token"
+    assert seen[0]["Authorization"] == "Bearer " + "a" * 40

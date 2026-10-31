@@ -1,10 +1,19 @@
-"""Thin stdio MCP client for the authenticated Condere HTTP service."""
+"""Thin stdio MCP client for the authenticated Condere HTTP service.
 
+A private Cloud Run deployment admits only permitted Google identities: with
+CONDERE_API_IDENTITY=gcloud the client also sends the caller's Google identity token in
+X-Serverless-Authorization (checked by Cloud Run), keeping Condere's own token in
+Authorization (checked by the API).
+"""
+
+import asyncio
 import base64
 import hashlib
 import os
 import re
+import subprocess
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -55,10 +64,46 @@ def segment(value: str) -> str:
     return quote(value, safe="")
 
 
+class GcloudIdentity:
+    """The signed-in gcloud account's Google identity token, renewed before it expires."""
+
+    LIFETIME_SECONDS = 50 * 60  # Google identity tokens last one hour
+
+    def __init__(self, account: str | None = None):
+        self.account = account
+        self._token, self._expires = None, 0.0
+
+    def __call__(self) -> str:
+        if self._token is None or time.monotonic() > self._expires:
+            command = ["gcloud", "auth", "print-identity-token"]
+            if self.account:
+                command.append("--account=" + self.account)
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode:
+                raise ValueError("No Google identity token; run `gcloud auth login`.")
+            self._token = result.stdout.strip()
+            self._expires = time.monotonic() + self.LIFETIME_SECONDS
+        return self._token
+
+
 class AssessmentClient:
-    def __init__(self, api_url: str, token: str, export_directory: Path, *, transport=None):
+    def __init__(
+        self,
+        api_url: str,
+        token: str,
+        export_directory: Path,
+        *,
+        identity=None,
+        transport=None,
+    ):
+        """`identity()` returns a Google identity token for a private Cloud Run service."""
         if len(token) < 32 or any(char.isspace() for char in token):
             raise ValueError("Configure a bearer token with at least 32 non-whitespace characters.")
+
+        async def prove_identity(request: httpx.Request) -> None:
+            token = await asyncio.to_thread(identity)
+            request.headers["X-Serverless-Authorization"] = "Bearer " + token
+
         self.http = httpx.AsyncClient(
             base_url=validate_api_url(api_url),
             headers={"Authorization": "Bearer " + token},
@@ -66,6 +111,7 @@ class AssessmentClient:
             follow_redirects=False,
             trust_env=False,
             transport=transport,
+            event_hooks={"request": [prove_identity]} if identity else None,
         )
         self.export_directory = export_directory.expanduser().absolute()
 
@@ -338,10 +384,16 @@ def create_server(client: AssessmentClient) -> FastMCP:
 
 def main() -> None:
     try:
+        identity = os.environ.get("CONDERE_API_IDENTITY")
+        if identity not in {None, "", "gcloud"}:
+            raise SystemExit("CONDERE_API_IDENTITY must be gcloud or unset.")
         client = AssessmentClient(
             os.environ["CONDERE_API_URL"],
             os.environ["CONDERE_API_TOKEN"],
             Path(os.environ["CONDERE_EXPORT_DIRECTORY"]),
+            identity=GcloudIdentity(os.environ.get("CONDERE_API_IDENTITY_ACCOUNT"))
+            if identity
+            else None,
         )
     except KeyError as error:
         raise SystemExit(
