@@ -70,6 +70,10 @@ def object_client(environment: dict[str, str]):
             read_timeout=30,
             retries={"total_max_attempts": 1},
             s3={"addressing_style": "path"},
+            # Cloudflare R2 rejects the CRC checksums newer botocore sends by default; send and
+            # check them only where an operation requires them (also valid for MinIO and S3).
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
         ),
     )
 

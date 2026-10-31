@@ -11,6 +11,8 @@ import pytest
 from condere.interfaces import server
 from condere.interfaces.mcp import AssessmentClient, validate_api_url
 from condere.interfaces.server import configuration
+from condere.runtime.evidence import object_client
+from condere.runtime.state import AssessmentStore
 
 
 def test_runtime_accepts_only_pinned_or_verified_local_images(tmp_path, monkeypatch):
@@ -170,3 +172,22 @@ async def test_transport_rejects_redirects_changed_originals_and_failed_exports(
         assert list(client.export_directory.iterdir()) == [expected]
     finally:
         await client.http.aclose()
+
+
+def test_cloud_storage_and_pooled_database_settings():
+    client = object_client(
+        {
+            "CONDERE_EVIDENCE_ENDPOINT": "https://account.r2.cloudflarestorage.com",
+            "CONDERE_EVIDENCE_REGION": "auto",
+            "CONDERE_EVIDENCE_ACCESS_KEY": "synthetic-not-a-credential",
+            "CONDERE_EVIDENCE_SECRET_KEY": "synthetic-not-a-credential",
+        }
+    )
+    # R2 rejects botocore's default CRC checksums.
+    assert client.meta.config.request_checksum_calculation == "when_required"
+    assert client.meta.config.response_checksum_validation == "when_required"
+    pooled = "postgresql://app@project-pooler.example/condere"
+    direct = "postgresql://app@project.example/condere"
+    # The coordinator's session lock and schema setup bypass a transaction-mode pooler.
+    assert AssessmentStore(pooled, direct_dsn=direct)._direct_dsn == direct
+    assert AssessmentStore(pooled)._direct_dsn == pooled

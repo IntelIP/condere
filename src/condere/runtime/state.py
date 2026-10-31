@@ -100,8 +100,14 @@ def money(value: int) -> int:
 class AssessmentStore:
     """Synchronous transactions; async adapters must use a worker thread."""
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, *, direct_dsn: str | None = None):
+        """`direct_dsn` bypasses a transaction-mode pooler (Neon's `-pooler` endpoint).
+
+        The coordinator lock is a session advisory lock and schema setup takes DDL locks; both
+        need a real session. Ordinary transactions may use the pooled `dsn`.
+        """
         self._dsn = dsn
+        self._direct_dsn = direct_dsn or dsn
 
     @contextmanager
     def connection(self):
@@ -112,7 +118,7 @@ class AssessmentStore:
     async def execution_lock(self, owner: str, assessment_id: str):
         """One live coordinator per assessment; process loss releases the database session lock."""
         async with await psycopg.AsyncConnection.connect(
-            self._dsn, row_factory=dict_row, autocommit=True
+            self._direct_dsn, row_factory=dict_row, autocommit=True
         ) as connection:
             row = await (
                 await connection.execute(
@@ -137,7 +143,7 @@ class AssessmentStore:
                 )
 
     def setup(self) -> None:
-        with self.connection() as connection:
+        with psycopg.connect(self._direct_dsn, row_factory=dict_row) as connection:
             connection.execute("SELECT pg_advisory_xact_lock(20261021, 4)")
             connection.execute(SCHEMA)
             # Owner decision 2026-10-28: a campaign may be uncapped; charges are still recorded.

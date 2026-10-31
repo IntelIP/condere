@@ -48,6 +48,9 @@ PROVIDER = ("CONDERE_MODEL_PROVIDER", "CONDERE_CHATGPT_HOME", "APIFY_TOKEN", "GI
 # Code sandbox: CONDERE_SANDBOX=smol (default, local SmolVM with CONDERE_SMOL_IMAGE) or modal
 # (Modal credentials from MODAL_TOKEN_ID and MODAL_TOKEN_SECRET or the local Modal profile).
 SANDBOX = ("CONDERE_SANDBOX", "CONDERE_SMOL_IMAGE")
+# Behind a transaction-mode pooler, CONDERE_DATABASE_DIRECT_URL is the same database's direct
+# endpoint, for the coordinator's session lock and schema setup.
+DATABASE = ("CONDERE_DATABASE_DIRECT_URL",)
 # Trace destination: LANGSMITH_PROJECT, or LANGSMITH_AGENT_ID with LANGSMITH_AGENT_ENVIRONMENT.
 TRACING = (
     "LANGSMITH_PROJECT",
@@ -84,7 +87,9 @@ def configuration(environment) -> dict[str, str]:
         raise ValueError("Missing Condere runtime configuration: " + ", ".join(missing))
     values = {name: environment[name] for name in REQUIRED}
     values |= {
-        name: environment[name] for name in TRACING + PROVIDER + SANDBOX if environment.get(name)
+        name: environment[name]
+        for name in TRACING + PROVIDER + SANDBOX + DATABASE
+        if environment.get(name)
     }
     provider = values.setdefault("CONDERE_MODEL_PROVIDER", "chatgpt")
     if provider not in {"chatgpt", "openrouter"}:
@@ -115,7 +120,9 @@ def sandbox_backend(values: dict) -> tuple[type, str]:
 
 def build_app():
     values = configuration(os.environ)
-    state = AssessmentStore(values["CONDERE_DATABASE_URL"])
+    state = AssessmentStore(
+        values["CONDERE_DATABASE_URL"], direct_dsn=values.get("CONDERE_DATABASE_DIRECT_URL")
+    )
     state.setup()
     objects = object_client(values)
     tracing = None
