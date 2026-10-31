@@ -61,3 +61,27 @@ def test_funnel_follows_sources_by_route_to_the_options():
     assert scores["citation_yield"] == round(1 / 3, 3)
     assert scores["candidate_use"] == 0.5
     assert scores["route_reddit_decisive"] == 1
+
+
+def test_free_routes_and_youtube_through_exa_are_their_own_routes():
+    operations = [
+        {
+            "id": 1,
+            "kind": "exa",
+            "state": "succeeded",
+            "request": {"body": {"type": "auto", "includeDomains": ["youtube.com"]}},
+        },
+        {"id": 2, "kind": "hackernews", "state": "succeeded", "request": {}},
+        {"id": 3, "kind": "github", "state": "succeeded", "request": {}},
+    ]
+    sources = [
+        {"id": SOURCE, "provenance": {"provider": "exa", "operation_id": 1}},
+        {"id": UNUSED, "provenance": {"provider": "hackernews", "operation_id": 2}},
+        {"id": FETCHED, "provenance": {"provider": "github", "operation_id": 3}},
+    ]
+    funnel = source_funnel(sources, operations, [], Analysis.model_validate(analysis()))
+
+    routes = funnel["routes"]
+    assert routes["exa:youtube"]["calls"] == 1 and routes["exa:youtube"]["decisive"] == 1
+    assert routes["hackernews"]["calls"] == 1 and routes["hackernews"]["saved"] == 1
+    assert routes["github"]["calls"] == 1 and routes["github"]["saved"] == 1

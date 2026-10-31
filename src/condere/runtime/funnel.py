@@ -12,15 +12,22 @@ from condere.runtime.spinoff import Analysis
 
 STAGES = ("saved", "claimed", "cited", "decisive")
 APIFY_ROUTES = {"xquik": "x", "harshmaur": "reddit", "johnvc": "youtube"}
+RESEARCH_KINDS = {"exa", "apify", "hackernews", "github"}
+YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be"}
 
 
 def operation_route(operation: dict) -> str:
     request = operation.get("request") or {}
     if operation["kind"] == "apify":
         return APIFY_ROUTES.get(str(request.get("actor", "")).split("~")[0], "apify")
+    if operation["kind"] != "exa":
+        return operation["kind"]
     if request.get("path") == "/contents":
         return "exa:fetch"
-    return "exa:" + str((request.get("body") or {}).get("type") or "auto")
+    body = request.get("body") or {}
+    if set(body.get("includeDomains") or ()) & YOUTUBE_HOSTS:
+        return "exa:youtube"
+    return "exa:" + str(body.get("type") or "auto")
 
 
 def route_of(provenance: dict, operations: dict[str, dict]) -> str:
@@ -56,7 +63,7 @@ def source_funnel(
     }
     calls = defaultdict(int)
     for operation in operations:
-        if operation["kind"] in {"exa", "apify"} and operation["state"] == "succeeded":
+        if operation["kind"] in RESEARCH_KINDS and operation["state"] == "succeeded":
             calls[operation_route(operation)] += 1
     by_route = defaultdict(lambda: {"calls": 0} | {stage: 0 for stage in STAGES})
     for route, count in calls.items():
