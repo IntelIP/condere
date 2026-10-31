@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 from uuid import uuid4
 
@@ -539,3 +540,35 @@ def test_provider_slots_are_shared_across_processes_and_expire(store):
         )
     with other.provider_slot(provider, 1, poll_seconds=0.05):
         pass
+
+
+def test_health_reads_recent_runs_held_charges_and_month_spending(store):
+    owner, case = running(store)
+    settled = reserve(store, owner, case, "paid", 400_000)
+    store.dispatch(owner, case["id"], case["generation"], settled["id"], {"request": "a"})
+    store.finish_operation(
+        owner,
+        case["id"],
+        settled["id"],
+        {"ok": True},
+        succeeded=True,
+        actual_microusd=300_000,
+        cost_basis={"basis": "simulated provider bill"},
+    )
+    held = reserve(store, owner, case, "unbilled", 350_000)
+    store.dispatch(owner, case["id"], case["generation"], held["id"], {"request": "b"})
+    store.finish_operation(owner, case["id"], held["id"], {"ok": True}, succeeded=True)
+    report = store.health(owner, datetime.now(UTC) - timedelta(days=1))
+    (row,) = report["assessments"]
+    assert (row["id"], row["status"]) == (case["id"], "running")
+    assert (row["settled_microusd"], row["pending_microusd"]) == (300_000, 350_000)
+    assert [operation["id"] for operation in report["held"]] == [held["id"]]
+    assert report["month"] == [
+        {
+            "kind": "simulated-search",
+            "operations": 2,
+            "settled_microusd": 300_000,
+            "pending_microusd": 350_000,
+        }
+    ]
+    assert store.health("another-owner", datetime.now(UTC))["assessments"] == []

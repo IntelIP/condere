@@ -866,6 +866,45 @@ class AssessmentStore:
                 ).fetchall(),
             }
 
+    def health(self, owner: str, since) -> dict:
+        """Read-only operator view for the daily health job: runs changed since `since` and
+        every active run, unresolved paid charges, and spending this calendar month (UTC)."""
+        unresolved = """CASE WHEN o.actual_microusd IS NULL AND o.state <> 'released'
+                         THEN o.reserved_microusd ELSE 0 END"""
+        with self.connection() as connection:
+            assessments = connection.execute(
+                f"""SELECT a.id, a.status, a.created_at, a.updated_at,
+                       COALESCE(sum(o.actual_microusd),0)::bigint AS settled_microusd,
+                       COALESCE(sum({unresolved}),0)::bigint AS pending_microusd,
+                       count(o.id) FILTER (WHERE o.state='failed') AS failed_operations
+                   FROM assessments a LEFT JOIN operations o ON o.assessment_id=a.id
+                   WHERE a.owner_id=%s
+                     AND (a.updated_at >= %s OR a.status IN ('admitted','running'))
+                   GROUP BY a.id ORDER BY a.created_at""",
+                (owner, since),
+            ).fetchall()
+            # A finished call whose bill is still unknown; in-flight reservations are not held.
+            held = connection.execute(
+                """SELECT o.assessment_id, o.id, o.kind, o.state, o.reserved_microusd
+                   FROM operations o JOIN assessments a ON a.id=o.assessment_id
+                   WHERE a.owner_id=%s AND o.actual_microusd IS NULL
+                     AND o.state IN ('uncertain','succeeded','failed') AND o.reserved_microusd > 0
+                   ORDER BY o.created_at""",
+                (owner,),
+            ).fetchall()
+            month = connection.execute(
+                f"""SELECT o.kind, count(*) AS operations,
+                       COALESCE(sum(o.actual_microusd),0)::bigint AS settled_microusd,
+                       COALESCE(sum({unresolved}),0)::bigint AS pending_microusd
+                   FROM operations o JOIN assessments a ON a.id=o.assessment_id
+                   WHERE a.owner_id=%s
+                     AND o.created_at >= date_trunc('month', now() AT TIME ZONE 'UTC')
+                         AT TIME ZONE 'UTC'
+                   GROUP BY o.kind ORDER BY o.kind""",
+                (owner,),
+            ).fetchall()
+        return {"assessments": assessments, "held": held, "month": month}
+
     def finish_worker(
         self,
         owner: str,
