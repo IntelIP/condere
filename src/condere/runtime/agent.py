@@ -163,6 +163,8 @@ EXTRACTOR_TOOLS = {
     "x_search",
     "reddit_research",
     "youtube_transcripts",
+    "hacker_news_search",
+    "github_issues_search",
 }
 
 

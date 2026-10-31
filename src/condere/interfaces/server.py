@@ -125,6 +125,7 @@ def build_app():
             plan_credentials=plan,
             exa_key=values["EXA_API_KEY"],
             apify_token=values.get("APIFY_TOKEN"),
+            github_token=values.get("GITHUB_TOKEN"),
             tracing=tracing,
         )
         app = create_app(

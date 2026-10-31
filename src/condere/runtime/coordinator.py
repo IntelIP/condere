@@ -35,6 +35,7 @@ from condere.runtime.providers import (
     CLAUDE_OPUS,
     AccountedChatOpenAI,
     ApifyResearch,
+    CommunityResearch,
     ExaResearch,
     JevDecisions,
     ProviderContext,
@@ -65,6 +66,7 @@ class AssessmentCoordinator:
         plan_credentials: PlanCredentials | None = None,
         exa_key: str | None = None,
         apify_token: str | None = None,
+        github_token: str | None = None,
         model_factory=None,
         decision_factory=None,
         callbacks: list | None = None,
@@ -89,6 +91,7 @@ class AssessmentCoordinator:
         self.image, self.artifacts = image, artifacts.resolve()
         self.artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._router_key, self._exa_key, self._apify_token = openrouter_key, exa_key, apify_token
+        self._github_token = github_token
         self._decision_factory = decision_factory
         # ChatGPT plan usage takes precedence when the operator signed in for it.
         self.plan_credentials = plan_credentials
@@ -476,7 +479,7 @@ class AssessmentCoordinator:
             sandbox = await creation
             await asyncio.to_thread(sandbox.close)
             raise
-        succeeded, research, social, model, subagents = False, None, None, None, []
+        succeeded, research, social, community, model, subagents = False, None, None, None, None, []
         try:
             if sandbox.id != self.machine_name(worker):
                 raise Conflict(
@@ -513,6 +516,13 @@ class AssessmentCoordinator:
                         context,
                         self.service.evidence,
                         self._apify_token,
+                        private_terms=tuple(plan["private_terms"]),
+                    )
+                if role == "lead":
+                    community = CommunityResearch(
+                        context,
+                        self.service.evidence,
+                        github_token=self._github_token,
                         private_terms=tuple(plan["private_terms"]),
                     )
             if role == "lead":
@@ -558,6 +568,7 @@ class AssessmentCoordinator:
                         allowed_repositories=set(plan["repository_candidates"]),
                         callbacks=self.callbacks,
                         social=social,
+                        community=community,
                         code_model=subagents[0] if subagents else None,
                         extract_model=subagents[1] if subagents else None,
                     )
@@ -621,7 +632,7 @@ class AssessmentCoordinator:
             succeeded = True
             return completed
         finally:
-            for adapter in (research, social):
+            for adapter in (research, social, community):
                 if adapter is not None:
                     adapter.close()
             for item in (model, *subagents):

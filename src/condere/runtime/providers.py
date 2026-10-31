@@ -26,7 +26,13 @@ from openai import APIStatusError
 from pydantic import PrivateAttr
 
 from condere.runtime.evidence import EvidenceStore
-from condere.runtime.operations import ProviderResult, execute_once, previously_failed, refusal
+from condere.runtime.operations import (
+    ProviderRefused,
+    ProviderResult,
+    execute_once,
+    previously_failed,
+    refusal,
+)
 from condere.runtime.state import AssessmentStore, content_hash
 
 
@@ -818,6 +824,12 @@ _APIFY_SLOTS = threading.BoundedSemaphore(APIFY_CONCURRENCY)
 # A very small maxTotalChargeUsd makes Actors return nothing: a $0.0002 cap on a one-tweet
 # lookup produced an empty run, while $0.01 succeeded (2026-10-30). Never cap below this.
 APIFY_MIN_CHARGE_USD = Decimal("0.01")
+# Apify is the only route to Reddit and X, but the account's $30 monthly allowance ran out on
+# 2026-10-30 and YouTube now comes through Exa first. Each assessment may commit at most this
+# much to Apify (owner direction 2026-10-30); a call that would exceed it is refused unsent.
+# Parallel extractors check before reserving, so the cap can be exceeded by at most one
+# concurrent call per slot.
+APIFY_ASSESSMENT_CAP_USD = Decimal("0.15")
 APIFY_HOSTS = {
     "x": {"x.com", "twitter.com", "mobile.twitter.com"},
     "reddit": {"reddit.com", "old.reddit.com", "np.reddit.com"},
@@ -999,7 +1011,7 @@ class ApifyResearch:
         return self._run("x", body | self._x_output(), len(ids), material_gap)
 
     def x_conversation(
-        self, conversation_id: str, material_gap: str, *, max_items: int = 30
+        self, conversation_id: str, material_gap: str, *, max_items: int = 15
     ) -> dict:
         """Collect a conversation thread by its first tweet's ID."""
         if type(max_items) is not int or not 1 <= max_items <= 100:
@@ -1013,7 +1025,7 @@ class ApifyResearch:
         material_gap: str,
         *,
         since: date | None = None,
-        max_items: int = 30,
+        max_items: int = 15,
         sort: str = "Top",
     ) -> dict:
         if type(max_items) is not int or not 1 <= max_items <= 100:
@@ -1037,8 +1049,8 @@ class ApifyResearch:
         query: str | None = None,
         community: str | None = None,
         posted_after: date | None = None,
-        max_posts: int = 10,
-        comments_per_post: int = 5,
+        max_posts: int = 5,
+        comments_per_post: int = 3,
     ) -> dict:
         """Read specific threads or search posts, with their top comments."""
         if not thread_urls and not query:
@@ -1148,10 +1160,32 @@ class ApifyResearch:
             )
 
         with _APIFY_SLOTS:
+            self._within_cap(key, bound)
             operation = self._dispatch(
                 context, key, actor, body, params, bound, material_gap, invoke
             )
         return self._save(platform, actor, operation, bound)
+
+    def _within_cap(self, key: str, bound: Decimal) -> None:
+        """Refuse, unsent, a new Apify run that would take this assessment past its cap."""
+        context = self.context
+        committed, seen = 0, False
+        for operation in context.state.operations(context.owner, context.assessment_id):
+            if operation["kind"] != "apify":
+                continue
+            seen |= operation["operation_key"] == key
+            committed += (
+                operation["actual_microusd"]
+                if operation["actual_microusd"] is not None
+                else operation["reserved_microusd"]
+            )
+        if not seen and committed + microusd(bound) > microusd(APIFY_ASSESSMENT_CAP_USD):
+            raise ProviderRefused(
+                "apify",
+                None,
+                f"this assessment's Apify allowance (${APIFY_ASSESSMENT_CAP_USD}) is used; "
+                "use search_public, hacker_news_search or github_issues_search instead",
+            )
 
     def _dispatch(self, context, key, actor, body, params, bound, material_gap, invoke):
         return execute_once(
@@ -1253,4 +1287,220 @@ class ApifyResearch:
             "cost_status": "pending" if operation["actual_microusd"] is None else "settled",
             "reserved_microusd": microusd(bound),
             "actual_microusd": operation["actual_microusd"],
+        }
+
+
+# Free practitioner sources (owner direction 2026-10-30): Exa does not index Reddit or X, and
+# Apify's monthly allowance ran out, so firsthand evidence also comes from Hacker News (the
+# public Algolia API, no key) and GitHub issues (the public search API; a token raises the
+# rate limit from 10 to 30 searches a minute). Calls go through the ledger at $0 so they are
+# recorded, reused on continuation and never repeated.
+HN_SEARCH = "https://hn.algolia.com/api/v1/search"
+GITHUB_API = "https://api.github.com"
+FREE_TEXT_LIMIT = 8_000
+_TAGS = re.compile(r"<[^>]+>")
+_REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+
+
+def _plain(html: str | None) -> str:
+    text = _TAGS.sub(" ", (html or "").replace("<p>", "\n\n"))
+    for entity, char in (
+        ("&#x27;", "'"),
+        ("&quot;", '"'),
+        ("&#x2F;", "/"),
+        ("&gt;", ">"),
+        ("&lt;", "<"),
+        ("&amp;", "&"),
+    ):
+        text = text.replace(entity, char)
+    return re.sub(r"[ \t]+", " ", text).strip()
+
+
+class CommunityResearch:
+    """Hacker News and GitHub issues: free, firsthand practitioner evidence."""
+
+    def __init__(
+        self,
+        context: ProviderContext,
+        evidence: EvidenceStore,
+        *,
+        github_token: str | None = None,
+        private_terms: tuple[str, ...] = (),
+        transport=None,
+    ):
+        self.context, self.evidence = context, evidence
+        self.private_terms = (context.owner, context.assessment_id, *private_terms)
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "condere-research"}
+        if github_token:
+            headers["Authorization"] = f"Bearer {github_token}"
+            self.private_terms += (github_token,)
+        self.client = httpx.Client(
+            timeout=30, follow_redirects=False, transport=transport, headers=headers
+        )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def hacker_news(
+        self,
+        query: str,
+        material_gap: str,
+        *,
+        since: date | None = None,
+        kind: str = "all",
+        max_items: int = 20,
+    ) -> dict:
+        if kind not in {"all", "story", "comment"}:
+            raise ValueError("Search stories, comments or all.")
+        if type(max_items) is not int or not 1 <= max_items <= 50:
+            raise ValueError("Read 1-50 Hacker News items.")
+        params = {
+            "query": public_query(query, self.private_terms),
+            "hitsPerPage": max_items,
+            "tags": "(story,comment)" if kind == "all" else kind,
+        }
+        if since:
+            params["numericFilters"] = (
+                f"created_at_i>{int(datetime.combine(since, datetime.min.time(), UTC).timestamp())}"
+            )
+        data = self._get("hackernews", HN_SEARCH, params, material_gap)
+        results = []
+        for index, hit in enumerate(data.get("hits", [])):
+            story = hit.get("story_id") or hit.get("objectID")
+            body = _plain(hit.get("comment_text") or hit.get("story_text"))
+            title = hit.get("title") or hit.get("story_title") or "Hacker News comment"
+            text = f"{title}\n\n{body}".strip()[:FREE_TEXT_LIMIT]
+            if not body and not hit.get("title"):
+                continue
+            results.append(
+                self._save(
+                    "hackernews",
+                    f"https://news.ycombinator.com/item?id={hit['objectID']}",
+                    hit,
+                    text,
+                    {
+                        "provider": "hackernews",
+                        "result_index": index,
+                        "published_at": hit.get("created_at"),
+                        "title": title,
+                        "author": hit.get("author"),
+                        "points": hit.get("points"),
+                        "origin_group": f"hackernews:{story}",
+                        "links": [hit["url"]] if hit.get("url") else [],
+                        "public": True,
+                    },
+                )
+            )
+        return {"query": params["query"], "results": results}
+
+    def github_issues(
+        self,
+        query: str,
+        material_gap: str,
+        *,
+        repository: str | None = None,
+        since: date | None = None,
+        max_items: int = 20,
+    ) -> dict:
+        if type(max_items) is not int or not 1 <= max_items <= 50:
+            raise ValueError("Read 1-50 GitHub issues.")
+        terms = [public_query(query, self.private_terms), "is:issue"]
+        if repository:
+            if not _REPOSITORY.fullmatch(repository):
+                raise ValueError("Name the repository as owner/name.")
+            terms.append(f"repo:{repository}")
+        if since:
+            terms.append(f"created:>={since.isoformat()}")
+        params = {"q": " ".join(terms), "per_page": max_items, "sort": "reactions"}
+        data = self._get("github", f"{GITHUB_API}/search/issues", params, material_gap)
+        results = []
+        for index, issue in enumerate(data.get("items", [])):
+            repo = "/".join(urlsplit(issue["html_url"]).path.strip("/").split("/")[:2])
+            reactions = (issue.get("reactions") or {}).get("total_count")
+            activity = f"{issue.get('comments')} comments, {reactions} reactions"
+            text = (
+                f"{issue.get('title')}\n\n{issue.get('body') or ''}"
+                f"\n\n[{activity}, {issue.get('state')}]"
+            )[:FREE_TEXT_LIMIT]
+            results.append(
+                self._save(
+                    "github",
+                    issue["html_url"],
+                    issue,
+                    text,
+                    {
+                        "provider": "github",
+                        "result_index": index,
+                        "published_at": issue.get("created_at"),
+                        "title": f"{repo}#{issue.get('number')}: {issue.get('title')}",
+                        "author": (issue.get("user") or {}).get("login"),
+                        "reactions": reactions,
+                        "origin_group": f"github:{repo}#{issue.get('number')}",
+                        "links": [],
+                        "public": True,
+                    },
+                )
+            )
+        return {"query": params["q"], "results": results}
+
+    def _get(self, kind: str, url: str, params: dict, material_gap: str) -> dict:
+        if not material_gap.strip():
+            raise ValueError("Explain the material missing fact before searching.")
+        context = self.context
+        key = f"{kind}:" + content_hash([url, params])
+
+        def invoke():
+            response = self.client.get(url, params=params)
+            if response.is_error and (
+                refused := refusal(kind, response.status_code, response.text)
+            ):
+                raise refused
+            response.raise_for_status()
+            if len(response.content) > MAX_RESPONSE_BYTES:
+                raise ValueError("The provider response exceeded its admitted size.")
+            return ProviderResult(
+                {"data": response.json(), "retrieved_at": datetime.now(UTC).isoformat()},
+                actual_microusd=0,
+                cost_basis={"basis": "free public API; no charge"},
+            )
+
+        operation = execute_once(
+            context.state,
+            owner=context.owner,
+            assessment_id=context.assessment_id,
+            generation=context.generation,
+            key=key,
+            kind=kind,
+            request={"url": url, "params": params},
+            max_microusd=0,
+            dispatch_identity={"provider": kind, "material_gap": material_gap},
+            invoke=invoke,
+        )
+        if operation["state"] != "succeeded":
+            raise previously_failed(kind, operation)
+        self._operation, self._retrieved_at = operation, operation["result"]["retrieved_at"]
+        return operation["result"]["data"]
+
+    def _save(self, kind, origin, item, text, provenance) -> dict:
+        source = self.evidence.save_source(
+            self.context.owner,
+            self.context.assessment_id,
+            kind="web",
+            origin=public_url(origin),
+            original=json.dumps(item, sort_keys=True).encode(),
+            text=text,
+            media_type="application/json",
+            provenance=provenance | {"operation_id": self._operation["id"]},
+            limitations=[
+                "A practitioner's own post or issue: firsthand, but one person's account.",
+            ],
+            retrieved_at=datetime.fromisoformat(self._retrieved_at),
+        )
+        return {
+            "source_id": source.id,
+            "title": provenance["title"],
+            "url": source.origin,
+            "published_at": provenance["published_at"],
+            "origin_group": provenance["origin_group"],
+            "excerpt": text[:300],
         }

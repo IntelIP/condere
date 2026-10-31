@@ -92,11 +92,15 @@ when evidence changes them:
      `search-routing`), each with the same buyer questions (who has the pain,
      what it costs, what they use today, what they pay, why they would or would
      not switch) and a recency window of about the last 12 months:
-     - practitioners on Reddit (name the relevant communities) and Hacker News;
-     - practitioners on X;
+     - practitioners on Hacker News and in GitHub issues (free; name the
+       projects whose users have the pain);
+     - practitioners on Reddit (name one community) and X, narrowly: these are
+       paid and capped per assessment, so send them only for a gap the free
+       routes leave;
      - competitors, vendors and their current pricing pages;
      - recent news and launches in the category;
-     - talks and demos on YouTube where the capability is shown in use.
+     - talks and demos on YouTube where the capability is shown in use (found
+       through `search_public`, which returns transcripts).
      Ask each to run its searches and return dated claims.
    Buyer evidence is where most decisions are won or lost; spend your research
    there.

@@ -20,7 +20,7 @@ from condere.runtime.calculations import calculate as evaluate_calculation
 from condere.runtime.contracts import RepositoryInspection
 from condere.runtime.evidence import EvidenceError, SourceDocument
 from condere.runtime.indexing import pinned_snapshot
-from condere.runtime.providers import ApifyResearch, ExaResearch
+from condere.runtime.providers import ApifyResearch, CommunityResearch, ExaResearch
 from condere.runtime.repositories import canonical_repository, stage_repository
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService
@@ -79,6 +79,7 @@ def worker_tools(
     repository_cache: Path,
     allowed_repositories: set[str],
     social: ApifyResearch | None = None,
+    community: CommunityResearch | None = None,
 ) -> list:
     """Build only the assigned tools, using identities fixed by the trusted coordinator."""
     state, evidence = service.state, service.evidence
@@ -95,11 +96,13 @@ def worker_tools(
             != (owner, assessment_id, generation, assigned["assignment"]["role"])
         ):
             raise Conflict("Research must use this worker's assessment and spending ledger.")
-    if social is not None:
-        context = social.context
+    for adapter in (social, community):
+        if adapter is None:
+            continue
+        context = adapter.context
         if (
             context.state is not state
-            or social.evidence is not evidence
+            or adapter.evidence is not evidence
             or (context.owner, context.assessment_id, context.generation, context.worker_role)
             != (owner, assessment_id, generation, assigned["assignment"]["role"])
         ):
@@ -399,7 +402,7 @@ def worker_tools(
         return require_social().x_posts(tuple(posts), material_gap)
 
     @tool
-    def x_conversation(conversation_id: str, material_gap: str, max_items: int = 30) -> dict:
+    def x_conversation(conversation_id: str, material_gap: str, max_items: int = 15) -> dict:
         """Read the replies and thread under a tweet, by its conversation ID."""
         guard("x_conversation")
         return require_social().x_conversation(conversation_id, material_gap, max_items=max_items)
@@ -409,7 +412,7 @@ def worker_tools(
         query: str,
         material_gap: str,
         since: date | None = None,
-        max_items: int = 30,
+        max_items: int = 15,
         sort: Literal["Top", "Latest"] = "Top",
     ) -> dict:
         """Search X for what practitioners say now: launches, complaints, workarounds.
@@ -428,12 +431,13 @@ def worker_tools(
         query: str | None = None,
         community: str | None = None,
         posted_after: date | None = None,
-        max_posts: int = 10,
-        comments_per_post: int = 5,
+        max_posts: int = 5,
+        comments_per_post: int = 3,
     ) -> dict:
         """Read Reddit threads or search posts with top comments: user pain, costs, switching.
 
-        Use community (for example r/selfhosted) to stay in the relevant audience.
+        Use community (for example r/selfhosted) to stay in the relevant audience. Paid and
+        capped per assessment: prefer hacker_news_search and github_issues_search first.
         """
         guard("reddit_research")
         return require_social().reddit(
@@ -448,9 +452,54 @@ def worker_tools(
 
     @tool
     def youtube_transcripts(videos: list[str], material_gap: str) -> dict:
-        """Transcribe up to 5 YouTube videos: demos, talks and walkthroughs of a capability."""
+        """Transcribe up to 5 YouTube videos when search_public did not return the transcript.
+
+        Paid and capped per assessment. search_public with include_domains=["youtube.com"]
+        finds videos with their transcripts first.
+        """
         guard("youtube_transcripts")
         return require_social().youtube_transcripts(tuple(videos), material_gap)
+
+    def require_community():
+        if community is None:
+            raise Conflict("Community research is not configured for this worker.")
+        return community
+
+    @tool
+    def hacker_news_search(
+        query: str,
+        material_gap: str,
+        since: date | None = None,
+        kind: Literal["all", "story", "comment"] = "all",
+        max_items: int = 20,
+    ) -> dict:
+        """Search Hacker News stories and comments: builders' pain, workarounds, adoption.
+
+        Free. Comments are firsthand practitioner accounts; use kind="comment" for them.
+        Set since for recency.
+        """
+        guard("hacker_news_search")
+        return require_community().hacker_news(
+            query, material_gap, since=since, kind=kind, max_items=max_items
+        )
+
+    @tool
+    def github_issues_search(
+        query: str,
+        material_gap: str,
+        repository: str | None = None,
+        since: date | None = None,
+        max_items: int = 20,
+    ) -> dict:
+        """Search GitHub issues, most-reacted first: unmet needs and pain from real users.
+
+        Free. Name repository (owner/name) to read one project's users; omit it to find the
+        need across projects. Supports GitHub search syntax (quotes, label:, in:title).
+        """
+        guard("github_issues_search")
+        return require_community().github_issues(
+            query, material_gap, repository=repository, since=since, max_items=max_items
+        )
 
     @tool
     def inspect_repository(
@@ -679,6 +728,8 @@ def worker_tools(
         x_search,
         reddit_research,
         youtube_transcripts,
+        hacker_news_search,
+        github_issues_search,
         inspect_repository,
         submit_claims,
         submit_analysis,

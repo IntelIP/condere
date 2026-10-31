@@ -8,7 +8,12 @@ from langchain_core.language_models import BaseChatModel
 
 from condere.runtime.agent import build_agent, build_lead_agent
 from condere.runtime.chatgpt_plan import PlanChatOpenAI
-from condere.runtime.providers import AccountedChatOpenAI, ApifyResearch, ExaResearch
+from condere.runtime.providers import (
+    AccountedChatOpenAI,
+    ApifyResearch,
+    CommunityResearch,
+    ExaResearch,
+)
 from condere.runtime.sandbox import SmolSandbox
 from condere.runtime.service import AssessmentService, output_keys
 from condere.runtime.state import Conflict
@@ -30,6 +35,7 @@ async def run_worker(
     allowed_repositories: set[str],
     callbacks: list | None = None,
     social: ApifyResearch | None = None,
+    community: CommunityResearch | None = None,
     code_model: BaseChatModel | None = None,
     extract_model: BaseChatModel | None = None,
 ) -> dict:
@@ -83,6 +89,7 @@ async def run_worker(
             repository_cache=repository_cache,
             allowed_repositories=allowed_repositories,
             social=social,
+            community=community,
         )
         assignment = json.dumps(assigned["assignment"], sort_keys=True)
         if role == "lead":

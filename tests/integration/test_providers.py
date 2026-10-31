@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import date
 from uuid import uuid4
 
 import httpx
@@ -18,6 +19,7 @@ from condere.runtime.providers import (
     MODEL_ID,
     MODEL_OUTPUT_TOKENS,
     ApifyResearch,
+    CommunityResearch,
     ExaResearch,
     JevDecisions,
     ProviderContext,
@@ -700,9 +702,9 @@ def test_apify_runs_are_capped_upstream_and_saved_with_origin_groups(provider_ca
     assert json.loads(requests[0].content)["tweetIds"] == ["2115777960355708930"]
     # One tweet costs far below the minimum cap that keeps the Actor from returning nothing.
     assert Decimal(requests[0].url.params["maxTotalChargeUsd"]) == Decimal("0.01")
-    # Five posts with five comments each (the default) is 30 results: (0.02 + 30 * 0.002) * 1.25.
-    assert Decimal(requests[1].url.params["maxTotalChargeUsd"]) == Decimal("0.1")
-    assert json.loads(requests[1].content)["maxCommentsPerPost"] == 5
+    # Five posts with three comments each (the default) is 20 results: (0.02 + 20 * 0.002) * 1.25.
+    assert Decimal(requests[1].url.params["maxTotalChargeUsd"]) == Decimal("0.075")
+    assert json.loads(requests[1].content)["maxCommentsPerPost"] == 3
     tweet = tweets["results"][0]
     assert tweet["published_at"] == "2026-10-29T12:09:09+00:00"
     assert tweet["origin_group"] == "x:conversation:2115760778951409799"
@@ -760,3 +762,113 @@ def test_apify_runs_never_exceed_the_plan_concurrency(provider_case):
     finally:
         apify.close()
     assert 1 < peak[0] <= APIFY_CONCURRENCY
+
+
+def test_apify_refuses_new_runs_past_the_assessment_cap_without_sending(provider_case):
+    context, evidence = provider_case
+    starts = []
+
+    def respond(request):
+        if request.url.path.startswith("/v2/datasets/"):
+            return httpx.Response(200, json=[REDDIT_POST])
+        starts.append(json.loads(request.content)["searchTerms"])
+        run = {"id": "run", "status": "SUCCEEDED", "defaultDatasetId": "d", "usageTotalUsd": 0.07}
+        return httpx.Response(201, json={"data": run})
+
+    apify = ApifyResearch(
+        context, evidence, "fake-apify-token", transport=httpx.MockTransport(respond)
+    )
+    try:
+        # One wide read alone is bounded at $0.175, above the $0.15 allowance.
+        with pytest.raises(ProviderRefused, match="allowance"):
+            apify.reddit("Need pain", query="wide", max_posts=10, comments_per_post=5)
+        apify.reddit("Need pain", query="first")
+        apify.reddit("Need pain", query="second")
+        # $0.14 settled plus a $0.075 bound would pass the cap.
+        with pytest.raises(ProviderRefused, match="hacker_news_search"):
+            apify.reddit("Need pain", query="third")
+        # A saved result is still served: reading it again buys nothing.
+        assert apify.reddit("Need pain", query="first")["results"]
+    finally:
+        apify.close()
+    assert starts == [["first"], ["second"]]
+    assert [item["actual_microusd"] for item in operations(context)] == [70_000, 70_000]
+
+
+HN_HIT = {
+    "objectID": "41000002",
+    "story_id": 41000001,
+    "story_title": "Ask HN: How do you run vector search locally?",
+    "comment_text": "We pay &#x27;$400&#x2F;month&#x27; for a hosted index.<p>Moving to SQLite.",
+    "author": "builder",
+    "created_at": "2026-09-14T10:00:00Z",
+}
+ISSUE = {
+    "html_url": "https://github.com/example/vec/issues/12",
+    "number": 12,
+    "title": "Index rebuild takes hours",
+    "body": "Our nightly rebuild blocks deploys.",
+    "comments": 9,
+    "reactions": {"total_count": 31},
+    "state": "open",
+    "user": {"login": "operator"},
+    "created_at": "2026-08-01T09:00:00Z",
+}
+
+
+def test_hacker_news_and_github_issues_are_free_saved_and_never_repeated(provider_case):
+    context, evidence = provider_case
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if request.url.host == "hn.algolia.com":
+            return httpx.Response(200, json={"hits": [HN_HIT, {"objectID": "1"}]})
+        assert request.headers["authorization"] == "Bearer fake-github-token"
+        return httpx.Response(200, json={"items": [ISSUE]})
+
+    community = CommunityResearch(
+        context, evidence, github_token="fake-github-token", transport=httpx.MockTransport(respond)
+    )
+    try:
+        hn = community.hacker_news(
+            "local vector search cost", "Need pain", since=date(2026, 1, 1), kind="comment"
+        )
+        issues = community.github_issues(
+            "index rebuild", "Need pain", repository="example/vec", since=date(2026, 1, 1)
+        )
+        assert (
+            community.hacker_news(
+                "local vector search cost", "Need pain", since=date(2026, 1, 1), kind="comment"
+            )
+            == hn
+        )
+        for call in (
+            lambda: community.hacker_news("q", "Need pain", kind="job"),
+            lambda: community.github_issues("q", "Need pain", repository="not a repo"),
+            lambda: community.github_issues("q", " "),
+        ):
+            with pytest.raises(ValueError):
+                call()
+    finally:
+        community.close()
+    assert len(requests) == 2
+    assert requests[0].url.params["tags"] == "comment"
+    assert requests[0].url.params["numericFilters"] == "created_at_i>1767225600"
+    assert requests[1].url.params["q"] == (
+        "index rebuild is:issue repo:example/vec created:>=2026-01-01"
+    )
+    [comment] = hn["results"]  # a hit with no text is skipped
+    assert comment["url"] == "https://news.ycombinator.com/item?id=41000002"
+    assert comment["origin_group"] == "hackernews:41000001"
+    text = evidence.text(context.owner, context.assessment_id, comment["source_id"])
+    assert "'$400/month'" in text and "Moving to SQLite." in text
+    [issue] = issues["results"]
+    assert issue["origin_group"] == "github:example/vec#12"
+    assert issue["title"] == "example/vec#12: Index rebuild takes hours"
+    text = evidence.text(context.owner, context.assessment_id, issue["source_id"])
+    assert "[9 comments, 31 reactions, open]" in text
+    ledger = operations(context)
+    assert [item["kind"] for item in ledger] == ["hackernews", "github"]
+    assert [item["actual_microusd"] for item in ledger] == [0, 0]
+    assert [item["reserved_microusd"] for item in ledger] == [0, 0]

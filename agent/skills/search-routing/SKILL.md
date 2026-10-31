@@ -10,14 +10,22 @@ Search only when a material fact is missing. State that fact as `material_gap`.
 Make it current:
 - For anything time-sensitive (launches, pricing, funding, adoption, complaints,
   competitors), set `published_after` and `fresh=True` on `search_public`, and
-  `since` / `posted_after` on X and Reddit.
+  `since` / `posted_after` on Hacker News, GitHub issues, X and Reddit.
 - Read publication dates in results; prefer the most recent firsthand account.
 
 Route by question:
-- User pain, workarounds, costs: `reddit_research` (pick the community),
-  `x_search`, Hacker News via `include_domains=["news.ycombinator.com"]`.
+- User pain, workarounds, costs, firsthand: start with the free routes.
+  - `hacker_news_search` (`kind="comment"` for practitioners' own accounts).
+  - `github_issues_search`: unmet needs and pain from a project's users, most
+    reacted first; name `repository` for one project, omit it to find the need
+    across projects.
+  - Then, only if those leave the gap open, `reddit_research` (one named
+    community, the defaults) or `x_search`. Reddit and X are paid and capped per
+    assessment; when the tool reports the cap is used, stay on the free routes.
 - A supplied tweet or thread: `x_posts`, then `x_conversation` for replies.
-- Demos and talks: `youtube_transcripts`.
+- Demos and talks: `search_public` with `include_domains=["youtube.com"]`; its
+  results carry the video's transcript. Use `youtube_transcripts` only for a
+  video whose result had no transcript.
 - Launches, funding, acquisitions: `search_public` with `category="news"`.
 - Vendors and pricing: `category="company"` or `include_domains` for the
   vendor; fetch the pricing page live with `fetch_public_url`.
