@@ -126,6 +126,36 @@ def exa_page_bound(*, fresh: bool) -> int:
     return microusd(EXA_PAGE_CONTENT_USD + (EXA_LIVE_PAGE_MARGIN_USD if fresh else 0))
 
 
+# Per-assessment allowances for paid research (owner direction 2026-10-30). With Apify out of
+# credit, one run made 16 deep-lite and 4 deep Exa searches and doubled Exa spend ($0.67 to
+# $1.35). Concurrent extractors check before reserving, so an allowance can be exceeded by at
+# most one in-flight call per extractor.
+EXA_ASSESSMENT_CAP_USD = Decimal("1.00")
+
+
+def within_assessment_cap(
+    context: "ProviderContext", kind: str, key: str, bound: int, cap: Decimal, instead: str
+) -> None:
+    """Refuse, unsent, a new paid call that would take this assessment past its allowance.
+
+    A request already in the ledger is never refused, so saved results stay readable.
+    """
+    committed, seen = 0, False
+    for operation in context.state.operations(context.owner, context.assessment_id):
+        if operation["kind"] != kind:
+            continue
+        seen |= operation["operation_key"] == key
+        committed += (
+            operation["actual_microusd"]
+            if operation["actual_microusd"] is not None
+            else operation["reserved_microusd"]
+        )
+    if not seen and committed + bound > microusd(cap):
+        raise ProviderRefused(
+            kind, None, f"this assessment's {kind} allowance (${cap}) is used; {instead}"
+        )
+
+
 def exa_bound(depth: str, results: int, fresh: bool, additional_queries: int) -> int:
     """A conservative reservation for one search; the response estimate can only raise it."""
     return microusd(
@@ -564,6 +594,15 @@ class ExaResearch:
             raise ValueError("Explain the material missing fact before purchasing new research.")
         context = self.context
         key = "exa:" + content_hash([path, body])
+        within_assessment_cap(
+            context,
+            "exa",
+            key,
+            maximum,
+            EXA_ASSESSMENT_CAP_USD,
+            "work from saved sources (read_source, search_saved_sources) and the free "
+            "hacker_news_search and github_issues_search",
+        )
 
         def invoke():
             with self.client.stream("POST", path, json=body) as response:
@@ -1160,32 +1199,18 @@ class ApifyResearch:
             )
 
         with _APIFY_SLOTS:
-            self._within_cap(key, bound)
+            within_assessment_cap(
+                self.context,
+                "apify",
+                key,
+                microusd(bound),
+                APIFY_ASSESSMENT_CAP_USD,
+                "use search_public, hacker_news_search or github_issues_search instead",
+            )
             operation = self._dispatch(
                 context, key, actor, body, params, bound, material_gap, invoke
             )
         return self._save(platform, actor, operation, bound)
-
-    def _within_cap(self, key: str, bound: Decimal) -> None:
-        """Refuse, unsent, a new Apify run that would take this assessment past its cap."""
-        context = self.context
-        committed, seen = 0, False
-        for operation in context.state.operations(context.owner, context.assessment_id):
-            if operation["kind"] != "apify":
-                continue
-            seen |= operation["operation_key"] == key
-            committed += (
-                operation["actual_microusd"]
-                if operation["actual_microusd"] is not None
-                else operation["reserved_microusd"]
-            )
-        if not seen and committed + microusd(bound) > microusd(APIFY_ASSESSMENT_CAP_USD):
-            raise ProviderRefused(
-                "apify",
-                None,
-                f"this assessment's Apify allowance (${APIFY_ASSESSMENT_CAP_USD}) is used; "
-                "use search_public, hacker_news_search or github_issues_search instead",
-            )
 
     def _dispatch(self, context, key, actor, body, params, bound, material_gap, invoke):
         return execute_once(

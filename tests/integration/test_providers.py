@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import date
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
@@ -11,6 +12,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from openai import APITimeoutError, InternalServerError
 from test_evidence import SimulatedObjects
 
+from condere.runtime import providers
 from condere.runtime.evidence import EvidenceError, EvidenceStore
 from condere.runtime.operations import ProviderRefused, ProviderUncertain
 from condere.runtime.providers import (
@@ -872,3 +874,25 @@ def test_hacker_news_and_github_issues_are_free_saved_and_never_repeated(provide
     assert [item["kind"] for item in ledger] == ["hackernews", "github"]
     assert [item["actual_microusd"] for item in ledger] == [0, 0]
     assert [item["reserved_microusd"] for item in ledger] == [0, 0]
+
+
+def test_exa_refuses_new_searches_past_the_assessment_allowance(provider_case, monkeypatch):
+    monkeypatch.setattr(providers, "EXA_ASSESSMENT_CAP_USD", Decimal("0.03"))
+    context, evidence = provider_case
+    sent = []
+
+    def respond(request):
+        sent.append(json.loads(request.content)["query"])
+        return httpx.Response(200, json=research_response())
+
+    exa = ExaResearch(context, evidence, "fake-exa-key", transport=httpx.MockTransport(respond))
+    try:
+        exa.search("first topic", "Need comparators")  # bounded at $0.017
+        with pytest.raises(ProviderRefused, match="saved sources"):
+            exa.search("second topic", "Need comparators")
+        # The saved result is still served without a new purchase.
+        assert exa.search("first topic", "Need comparators")["source_ids"]
+    finally:
+        exa.close()
+    assert sent == ["first topic"]
+    assert [item["reserved_microusd"] for item in operations(context)] == [17_000]

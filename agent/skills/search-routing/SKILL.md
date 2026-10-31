@@ -31,8 +31,14 @@ Route by question:
   vendor; fetch the pricing page live with `fetch_public_url`.
 - Adoption: GitHub (`include_domains=["github.com"]`) and the repository index.
 - Buyer complaints: review sites such as g2.com.
-- Broad questions: `depth="deep-lite"` or `"deep"` with two to four
-  `additional_queries` phrased differently.
+- Depth: use `depth="auto"` (the default) first. Move to `"deep-lite"` with two
+  to four `additional_queries` only when auto results leave a decision-changing
+  gap, and use `"deep"` at most once per assessment, for the hardest question.
+  Deep searches cost several times more.
+
+Paid search has a per-assessment allowance (Exa about $1, Apify $0.15). When a
+tool reports its allowance is used, work from saved sources and the free routes;
+do not retry the paid tool.
 
 Follow links one hop from strong sources with `fetch_public_url`. Search for the
 customer's task and consequences, not just the technology name, which returns

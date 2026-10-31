@@ -329,10 +329,12 @@ def worker_tools(
 
         For anything time-sensitive (launches, pricing, funding, adoption, complaints),
         set published_after and use fresh=True so pages are fetched live, not from cache.
-        Route by question: include_domains such as reddit.com, news.ycombinator.com or x.com
-        for user pain and workarounds, github.com for adoption, g2.com for buyer complaints;
-        category "news" for launches and funding, "company" for vendors. Use depth
-        "deep-lite" or "deep" with additional_queries (other phrasings) for broad questions.
+        Route by question: include_domains such as youtube.com for talks and demos (results
+        carry transcripts), github.com for adoption, g2.com for buyer complaints; category
+        "news" for launches and funding, "company" for vendors. Exa does not index Reddit or
+        X. Use depth "auto" by default. Use "deep-lite" with additional_queries only when auto
+        results leave a decision-changing gap, and "deep" at most once per assessment: they
+        cost several times more, and paid search is capped per assessment.
         Results return query-focused highlights with title, URL and publication date; call
         fetch_public_url for a page's full text and outgoing links.
         """
