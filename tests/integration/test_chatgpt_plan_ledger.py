@@ -8,6 +8,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 from test_providers import provider_case as provider_case
 
+from condere.runtime import chatgpt_plan
 from condere.runtime.chatgpt_plan import PLAN_SCOPE, PlanCredentials, PlanUsageStopped, plan_model
 from condere.runtime.operations import ProviderRefused
 
@@ -233,3 +234,23 @@ def test_a_refused_request_ends_that_call_not_the_assessment(provider_case, tmp_
     [failed] = context.state.operations(context.owner, context.assessment_id)
     assert failed["state"] == "failed" and failed["result"]["retryable"] is False
     assert context.state.get(context.owner, context.assessment_id)["status"] == "running"
+
+
+def test_a_stream_that_never_finishes_is_cut_at_its_role_limit(
+    provider_case, tmp_path, monkeypatch
+):
+    context, _ = provider_case
+    monkeypatch.setattr(chatgpt_plan, "SUBAGENT_STREAM_TOTAL_SECONDS", 0)
+    extractor = type(context)(
+        context.state, context.owner, context.assessment_id, context.generation, "extractor"
+    )
+    model = plan_model(
+        extractor,
+        credentials(tmp_path),
+        model="gpt-6.1-terra",
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: sse(completed()))),
+    )
+    payload = model._get_request_payload([HumanMessage("Read the sources.")])
+    response, failure = model._stream(payload)
+    assert response is None
+    assert failure == {"code": "transport_error", "detail": "stream did not complete within 0 s"}

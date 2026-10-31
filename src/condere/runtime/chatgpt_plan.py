@@ -111,6 +111,11 @@ RETRYABLE = {
 
 TRANSIENT_BACKOFF_SECONDS = (5, 20, 60)
 STREAM_IDLE_SECONDS = 120
+# A stream can keep sending events without finishing: an extractor call ran 900 s before the
+# route ended it (2026-10-30), holding the critical path for 15 minutes. Subagent calls
+# normally take under a minute, lead and planner calls at most ~3 minutes.
+STREAM_TOTAL_SECONDS = {"lead": 300, "planner": 300}
+SUBAGENT_STREAM_TOTAL_SECONDS = 180
 
 
 def retryable(code: str) -> bool:
@@ -531,12 +536,19 @@ class PlanChatOpenAI(ChatOpenAI):
             timeout=httpx.Timeout(300, read=STREAM_IDLE_SECONDS, connect=15),
             http_client=self.http_client,
         )
+        limit = STREAM_TOTAL_SECONDS.get(self._context.worker_role, SUBAGENT_STREAM_TOTAL_SECONDS)
+        deadline = time.monotonic() + limit
         try:
             with client.responses.create(**payload) as stream:
                 # The plan route can complete with an empty `output` and deliver the items only
                 # as output_item.done events (a live lead call on 2026-10-30 lost its tool call).
                 items = {}
                 for event in stream:
+                    if time.monotonic() > deadline:
+                        return None, {
+                            "code": "transport_error",
+                            "detail": f"stream did not complete within {limit} s",
+                        }
                     if event.type == "response.output_item.done":
                         items[event.output_index] = event.item
                     if event.type == "response.completed":
