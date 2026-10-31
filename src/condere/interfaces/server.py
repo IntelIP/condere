@@ -12,9 +12,15 @@ from urllib.parse import urlsplit
 import uvicorn
 
 from condere.infra.cloud_run import CloudRunJobs
+from condere.infra.secret_manager import SecretRecord
 from condere.interfaces.api import create_app
 from condere.interfaces.mcp import validate_api_url
-from condere.runtime.chatgpt_plan import DEFAULT_HOME, PLAN_CODE_MODEL, PlanCredentials
+from condere.runtime.chatgpt_plan import (
+    DEFAULT_HOME,
+    PLAN_CODE_MODEL,
+    CloudPlanCredentials,
+    PlanCredentials,
+)
 from condere.runtime.coordinator import AssessmentCoordinator
 from condere.runtime.evidence import EvidenceStore, object_client
 from condere.runtime.providers import CLAUDE_OPUS
@@ -46,6 +52,9 @@ REQUIRED = (
 # Lead and planner billing: CONDERE_MODEL_PROVIDER=chatgpt (default, the operator's ChatGPT
 # plan via Sign in with ChatGPT) or openrouter. APIFY_TOKEN enables X, Reddit and YouTube.
 PROVIDER = ("CONDERE_MODEL_PROVIDER", "CONDERE_CHATGPT_HOME", "APIFY_TOKEN", "GITHUB_TOKEN")
+# On Cloud Run the ChatGPT plan session is the deployment's own, in Secret Manager:
+# CONDERE_CHATGPT_SECRET = projects/<project>/secrets/<secret> (scripts/chatgpt_cloud_signin.py).
+CHATGPT_CLOUD = ("CONDERE_CHATGPT_SECRET",)
 # Code sandbox: CONDERE_SANDBOX=smol (default, local SmolVM with CONDERE_SMOL_IMAGE) or modal
 # (Modal credentials from MODAL_TOKEN_ID and MODAL_TOKEN_SECRET or the local Modal profile).
 SANDBOX = ("CONDERE_SANDBOX", "CONDERE_SMOL_IMAGE")
@@ -92,7 +101,7 @@ def configuration(environment) -> dict[str, str]:
     values = {name: environment[name] for name in REQUIRED}
     values |= {
         name: environment[name]
-        for name in TRACING + PROVIDER + SANDBOX + DATABASE + EXECUTOR
+        for name in TRACING + PROVIDER + SANDBOX + DATABASE + EXECUTOR + CHATGPT_CLOUD
         if environment.get(name)
     }
     provider = values.setdefault("CONDERE_MODEL_PROVIDER", "chatgpt")
@@ -149,7 +158,14 @@ def build_runtime(values: dict):
         )
         tracing = Tracing.from_environment(values, release=service.method_version)
         if provider == "chatgpt":
-            plan = PlanCredentials(Path(values.get("CONDERE_CHATGPT_HOME") or DEFAULT_HOME))
+            plan = (
+                CloudPlanCredentials(
+                    SecretRecord(values["CONDERE_CHATGPT_SECRET"]),
+                    lambda: state.provider_slot("chatgpt-credentials", 1),
+                )
+                if values.get("CONDERE_CHATGPT_SECRET")
+                else PlanCredentials(Path(values.get("CONDERE_CHATGPT_HOME") or DEFAULT_HOME))
+            )
             if not plan.status()["plan_usage"]:
                 raise ValueError(
                     "Sign in with ChatGPT first: uv run python scripts/chatgpt_login.py"

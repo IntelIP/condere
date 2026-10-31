@@ -1,14 +1,17 @@
 """Use the operator's ChatGPT plan for model calls through Sign in with ChatGPT.
 
 OpenAI documents ChatGPT plan usage for open-source and locally hosted apps
-(https://developers.openai.com/siwc/token-sharing-open-source). Paid or remotely hosted
-deployments need OpenAI partner access first; this module is for the local install only.
+(https://developers.openai.com/siwc/token-sharing-open-source), including the owner's own
+instance on a remote host (the "self-hosted VMs" guide): that host gets its own host ID, is
+signed in locally, and then owns its refreshes (`CloudPlanCredentials`). Offering plan usage
+to other people from a paid or remotely hosted app needs OpenAI partner access first.
 
 Sign-in registers Condere dynamically (`dynamic_agent_client`) for one ChatGPT account and
-workspace, bound to a persistent host ID. Credentials live in a private local directory,
-never in the repository, Doppler, logs, or traces. The refresh token rotates, so refreshes
-are serialized with a file lock. Inference uses the public Responses API with
-`store: false` and `stream: true`; plan usage stops on limits rather than switching billing.
+workspace, bound to a persistent host ID. Credentials live in a private local directory, or
+for the cloud deployment in Secret Manager; never in the repository, Doppler, logs, or
+traces. The refresh token rotates, so refreshes are serialized (a file lock locally, the
+database in the cloud). Inference uses the public Responses API with `store: false` and
+`stream: true`; plan usage stops on limits rather than switching billing.
 """
 
 import asyncio
@@ -296,6 +299,52 @@ def _error_code(response: httpx.Response) -> str:
     if isinstance(body.get("error"), dict):
         return body["error"].get("code") or f"http_{response.status_code}"
     return body.get("error") or f"http_{response.status_code}"
+
+
+class CloudPlanCredentials(PlanCredentials):
+    """The cloud deployment's own ChatGPT plan session, kept in Secret Manager.
+
+    OpenAI's self-hosted VM path: the deployment is its own agent host with its own
+    `ext_agent_host_id`, signed in locally (scripts/chatgpt_cloud_signin.py) and from then on
+    the only refresher of that session. The API and every assessment job share it: refreshes
+    are serialized through the database because the refresh token rotates, and each process
+    keeps the access token in memory until it nears expiry.
+    """
+
+    def __init__(self, store, lock: Callable, *, http: httpx.Client | None = None):
+        super().__init__(Path("/nonexistent/condere-chatgpt"), http=http)
+        self.store, self._shared_lock = store, lock
+        self._record = None
+
+    def host_id(self) -> str:
+        record = self.store.load()
+        if not record or not record.get("ext_agent_host_id"):
+            raise SignInRequired("Sign the deployment in: scripts/chatgpt_cloud_signin.py")
+        return record["ext_agent_host_id"]
+
+    def load(self) -> dict | None:
+        self._record = self.store.load()
+        return self._record
+
+    def save(self, record: dict) -> None:
+        self.store.save(record)
+        self._record = record
+
+    @contextlib.contextmanager
+    def _serialized(self):
+        with self._lock, self._shared_lock():
+            yield
+
+    def access_token(self, now: Callable[[], float] = time.time) -> str:
+        cached = self._record
+        if (
+            cached
+            and cached.get("access_token")
+            and PLAN_SCOPE in cached.get("scopes", [])
+            and cached["expires_at"] - now() > REFRESH_MARGIN_SECONDS
+        ):
+            return cached["access_token"]
+        return super().access_token(now)
 
 
 def authorization_request(credentials: PlanCredentials, redirect_uri: str) -> tuple[str, dict]:
