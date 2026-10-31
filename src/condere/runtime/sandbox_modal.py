@@ -31,10 +31,15 @@ _images_lock = threading.Lock()
 def analysis_image(base_image: str) -> modal.Image:
     with _images_lock:
         if base_image not in _images:
-            _images[base_image] = modal.Image.from_dockerfile(
-                ROOT / "infra/smolvm/Dockerfile",
-                context_dir=ROOT,
-                build_args={"BASE_IMAGE": base_image},
+            # Modal does not substitute build arguments in FROM, so start from the pinned base
+            # and apply the rest of the same Dockerfile.
+            steps = [
+                line
+                for line in (ROOT / "infra/smolvm/Dockerfile").read_text().splitlines()
+                if not line.startswith(("ARG BASE_IMAGE", "FROM "))
+            ]
+            _images[base_image] = modal.Image.from_registry(base_image).dockerfile_commands(
+                steps, context_dir=ROOT
             )
         return _images[base_image]
 
