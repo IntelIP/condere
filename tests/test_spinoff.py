@@ -104,6 +104,25 @@ def spread(options: list[str], chosen: str, top: float = 0.7) -> dict:
     }
 
 
+def rating(option: str, criterion: str, value: str) -> dict:
+    levels = ["strong", "moderate", "weak", "unknown"]
+    return {
+        "option": option,
+        "criterion": criterion,
+        "value": value,
+        "distribution": {level: 0.7 if level == value else 0.1 for level in levels},
+    }
+
+
+def demand(o1=("moderate", "moderate"), o2=("moderate", "weak")) -> list[dict]:
+    """Buyer pain and willingness to pay per option; O1 clears the demand bar by default."""
+    return [
+        rating(option, criterion, value)
+        for option, values in (("O1", o1), ("O2", o2))
+        for criterion, value in zip(("buyer_pain", "willingness_to_pay"), values, strict=True)
+    ]
+
+
 def decision(verdict="pursue", chosen="O1", route="managed_service", gates=None, ratings=None):
     passed = [
         {"option": key, "gate": gate, "p_yes": 0.9, "result": "pass"}
@@ -116,7 +135,7 @@ def decision(verdict="pursue", chosen="O1", route="managed_service", gates=None,
             "route": spread(list(Route.__args__), route),
             "option": spread(["O1", "O2", "none"], chosen),
             "gates": passed if gates is None else gates,
-            "ratings": ratings or [],
+            "ratings": demand() if ratings is None else ratings,
             "model": "typesafe/jev-1.14",
             "brief": link("artifacts/decision-brief.md"),
         }
@@ -167,10 +186,18 @@ def test_pursue_needs_evaluated_gates_and_evidenced_claims():
 
 
 def test_guidance_is_pursue_or_stop_and_old_results_stay_readable():
-    stopped = apply_decision_rules(Analysis.model_validate(analysis()), decision(verdict="stop"))
+    weak = demand(o1=("weak", "weak"), o2=("weak", "unknown"))
+    stopped = apply_decision_rules(
+        Analysis.model_validate(analysis()), decision(verdict="stop", ratings=weak)
+    )
     assert stopped.verdict.value == "stop" and stopped.adjustments == []
-    no_option = apply_decision_rules(Analysis.model_validate(analysis()), decision(chosen="none"))
+    # Jev chose no option: the ratings still decide, in both directions.
+    no_option = apply_decision_rules(
+        Analysis.model_validate(analysis()), decision(chosen="none", ratings=weak)
+    )
     assert no_option.verdict.value == "stop"
+    rated = apply_decision_rules(Analysis.model_validate(analysis()), decision(chosen="none"))
+    assert (rated.option.value, rated.verdict.value) == ("O1", "pursue")
     retired = decision().model_dump(mode="json")
     retired["verdict"] = {
         "value": "reshape",
@@ -251,3 +278,18 @@ def test_result_links_every_artifact_it_names():
     mismatched["build_plan"]["option"] = "O2"
     with pytest.raises(ValidationError, match="target the chosen option"):
         SpinoffResult.model_validate(mismatched)
+
+
+def test_the_verdict_follows_the_demand_ratings_not_the_overall_answer():
+    analysis_ = Analysis.model_validate(analysis())
+    # Jev answered pursue, but no option has both moderate pain and willingness to pay.
+    weak = apply_decision_rules(analysis_, decision(ratings=demand(o1=("moderate", "weak"))))
+    assert weak.verdict.value == "stop"
+    assert "moderate pain and weak willingness to pay" in weak.adjustments[-1].reason
+    # Jev answered stop and preferred O2, but O1 clears blockers and the demand bar.
+    strong = apply_decision_rules(
+        analysis_,
+        decision(verdict="stop", chosen="O2", route="services_only", ratings=demand()),
+    )
+    assert (strong.option.value, strong.verdict.value) == ("O1", "pursue")
+    assert [item.field for item in strong.adjustments] == ["option", "route", "verdict"]

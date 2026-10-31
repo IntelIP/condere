@@ -35,6 +35,26 @@ CRITERIA = {
     "founder_fit": "How well could the founder build and operate this with known resources?",
     "reversibility": "How cheaply could the founder test this and back out if it fails?",
 }
+# Per-criterion levels for the two demand ratings. With only the generic levels below, Jev
+# rated adjacent spending (teams paying for a neighbouring tool) as weak where a blind Claude
+# Fable review rated it moderate, which decided two of five acceptance cases (2026-10-30).
+DEMAND_LEVELS = {
+    "buyer_pain": {
+        "strong": "Buyers in the target segment describe the pain and what it costs them, "
+        "firsthand.",
+        "moderate": "Credible signs of the pain, mostly indirect: adjacent users, reports, "
+        "incidents or workarounds.",
+        "weak": "Little evidence of the pain, or evidence that buyers do not feel it.",
+        "unknown": "The brief has no evidence either way.",
+    },
+    "willingness_to_pay": {
+        "strong": "People pay for this outcome today, or have committed to.",
+        "moderate": "Adjacent spending (people pay for a neighbouring tool or service) or other "
+        "credible signals of budget.",
+        "weak": "No sign anyone pays for this, or evidence they refuse to.",
+        "unknown": "The brief has no evidence either way.",
+    },
+}
 RATING_CRITERIA = {
     "strong": "Supported by observed or reported evidence in the brief.",
     "moderate": "Partly supported; important parts are modelled or assumed.",
@@ -151,7 +171,7 @@ def option_questions(option_id: str) -> dict:
         questions[criterion] = {
             "type": "choice",
             "instructions": f"For option {option_id}: {question}",
-            "criteria": RATING_CRITERIA,
+            "criteria": DEMAND_LEVELS.get(criterion, RATING_CRITERIA),
         }
     return questions
 

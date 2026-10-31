@@ -360,35 +360,69 @@ def apply_decision_rules(analysis: Analysis, decision: Decision) -> Decision:
         )
         return target.model_copy(update={"value": value})
 
+    # Owner direction 2026-10-30: the verdict is composed from Jev's focused answers, not
+    # asked as one question. Across 33 runs Jev's overall verdict tracked the menu (the
+    # hedge when offered, pursue when not) and ignored its own ratings; its per-option
+    # ratings agreed with a blind Claude Fable review on buyer pain for 11 of 15 options,
+    # and this rule reproduced Fable's verdicts. The chosen option is the one clear of
+    # blockers with the strongest buyer pain and willingness to pay (Jev's option preference
+    # breaks ties); pursue needs at least moderate on both and an evidenced claim.
     verdict, route, option = decision.verdict, decision.route, decision.option
-    if option.value in options and failed(option.value):
-        eligible = [
-            key
-            for key, _ in sorted(option.distribution.items(), key=lambda item: -item[1])
-            if key in options and not failed(key)
-        ]
-        option = adjust(
-            "option",
-            option,
-            eligible[0] if eligible else "none",
-            f"{option.value} failed a hard gate; strengths cannot outweigh it.",
+    ratings = {(item.option, item.criterion): item.value for item in decision.ratings}
+    strength = {"strong": 2, "moderate": 1, "weak": 0, "unknown": 0}
+
+    def demand(option_id: str) -> tuple[int, int]:
+        return (
+            strength[ratings.get((option_id, "buyer_pain"), "unknown")],
+            strength[ratings.get((option_id, "willingness_to_pay"), "unknown")],
         )
-    if option.value == "none" and verdict.value == "pursue":
-        verdict = adjust("verdict", verdict, "stop", "Every option failed a hard gate.")
+
+    def meets_bar(option_id: str) -> bool:
+        return min(demand(option_id)) >= 1
+
+    clear = [key for key in options if not failed(key)]
+    ranked = sorted(
+        clear, key=lambda key: (meets_bar(key), demand(key), decision.option.distribution[key])
+    )
+    best = ranked[-1] if ranked else "none"
+    if best != option.value:
+        if option.value in options and failed(option.value):
+            reason = f"{option.value} failed a hard gate; strengths cannot outweigh it."
+        elif best == "none":
+            reason = "Every option failed a hard gate."
+        else:
+            reason = (
+                f"{best} has the strongest buyer pain and willingness to pay among options "
+                "clear of blockers."
+            )
+        option = adjust("option", option, best, reason)
     chosen = options.get(option.value)
     if chosen is not None and route.value != chosen.route:
         route = adjust("route", route, chosen.route, "The route follows the chosen option.")
-    if verdict.value == "pursue" and chosen is None:
-        verdict = adjust("verdict", verdict, "stop", "Pursuing needs a chosen option.")
-    if verdict.value == "pursue" and not any(
-        analysis.claim(claim).status in EVIDENCED for claim in chosen.claims
-    ):
-        verdict = adjust(
-            "verdict",
-            verdict,
-            "stop",
-            "No observed or reported claim supports the chosen option.",
+    if chosen is None:
+        target, reason = "stop", "Every option failed a hard gate."
+    elif not meets_bar(chosen.id):
+        pain, pay = (
+            ratings.get((chosen.id, "buyer_pain"), "unknown"),
+            ratings.get((chosen.id, "willingness_to_pay"), "unknown"),
         )
+        target = "stop"
+        reason = (
+            f"Pursuing needs at least moderate buyer pain and willingness to pay; {chosen.id} "
+            f"has {pain} pain and {pay} willingness to pay."
+        )
+    elif not any(analysis.claim(claim).status in EVIDENCED for claim in chosen.claims):
+        target, reason = "stop", "No observed or reported claim supports the chosen option."
+    else:
+        target, reason = (
+            "pursue",
+            (
+                f"{chosen.id} is clear of blockers with at least moderate buyer pain and "
+                "willingness to pay."
+            ),
+        )
+    if verdict.value != target:
+        verdict = adjust("verdict", verdict, target, reason)
     contested = list(decision.contested)
     if verdict.value == "pursue" and unknown(chosen.id):
         # Pursuing means running the next test; an unresolved gate is part of what it tests.
