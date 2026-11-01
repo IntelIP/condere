@@ -95,13 +95,13 @@ def test_work_continues_when_tracing_cannot_start(monkeypatch, sent):
 def test_status_distinguishes_pending_from_unavailable(monkeypatch, sent):
     tracing = Tracing.from_environment(configured(LANGSMITH_PROJECT="condere-dev"), release="v1")
 
-    def missing(client, run_id):
+    def missing(client, _run_id):
         raise LangSmithNotFoundError("not yet ingested")
 
     monkeypatch.setattr(type(tracing.client), "read_run", missing)
     assert tracing.status("trace") == ("pending", None)
 
-    def broken(client, run_id):
+    def broken(client, _run_id):
         raise ConnectionError("offline")
 
     monkeypatch.setattr(type(tracing.client), "read_run", broken)

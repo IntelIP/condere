@@ -1,5 +1,7 @@
 # Condere
 
+[![Public repository checks](https://github.com/IntelIP/condere/actions/workflows/ci.yml/badge.svg)](https://github.com/IntelIP/condere/actions/workflows/ci.yml)
+
 **The open-source spin-off analyst for your code.**
 
 Point Condere at a software repository to explore whether it could become a business,
