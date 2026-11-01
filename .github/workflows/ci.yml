@@ -28,7 +28,7 @@ jobs:
         with:
           go-version: "1.25.6"
           cache: false
-      - run: go install github.com/gitleaks/gitleaks/v8@v8.30.1
+      - run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
       - run: gitleaks git . --log-opts="--all --full-history --root" --redact=100 --no-banner
       - name: Record the tested commit
         if: always()
