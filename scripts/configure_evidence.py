@@ -1,11 +1,10 @@
 """Prepare credentials for the task's isolated local evidence server and bucket."""
 
 import argparse
-import json
 import secrets
 
 from botocore.exceptions import BotoCoreError, ClientError
-from doppler_config import doppler
+from local_config import arguments, load, save
 
 from condere.runtime.evidence import object_client
 
@@ -16,8 +15,9 @@ BUCKET = "condere-evidence"
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--initialize-bucket", action="store_true")
-    args = parser.parse_args()
-    values = json.loads(doppler("secrets", "download", "--no-file", "--format", "json"))
+    args = arguments(parser)
+    original = load(args)
+    values = dict(original)
     defaults = {
         "CONDERE_EVIDENCE_ENDPOINT": ENDPOINT,
         "CONDERE_EVIDENCE_REGION": "us-east-1",
@@ -36,7 +36,7 @@ def main() -> None:
         for name, value in defaults.items():
             if not values.get(name):
                 values[name] = value
-        doppler("secrets", "upload", "/dev/stdin", payload=json.dumps(values))
+        save(args, original, values)
         print("Prepared dedicated local evidence bindings; no services started.")
         return
     if any(not values.get(name) for name in defaults):

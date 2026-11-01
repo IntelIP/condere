@@ -19,3 +19,5 @@ data/
 *.sqlite3
 *.smolmachine
 *.checkpoint
+
+!.env.example

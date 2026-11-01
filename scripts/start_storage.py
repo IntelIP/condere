@@ -11,7 +11,7 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 
-ROOT = Path.home() / ".local/share/condere-mda/postgres"
+ROOT = Path.home() / ".local/share/condere/postgres"
 
 
 def run(command: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess:

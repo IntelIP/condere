@@ -3,7 +3,7 @@
 Reads the ledger and provider usage; starts no assessment and spends nothing. The report goes
 to the evidence bucket at `health/<date>.json` and to the log as one JSON line, so Cloud
 Logging and the coding agents read the same record. Each finding names the ceiling it crossed;
-the ceilings are the owner-approved values in docs/production.md and change only by reviewed
+the ceilings are deployment settings and change only by reviewed
 pull request.
 """
 

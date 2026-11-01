@@ -59,7 +59,7 @@ AGENT_NAME = "Condere"
 USAGE_URL = "https://chatgpt.com/settings/usage"
 CALLBACK_PORT = 1455
 CALLBACK_PATH = "/auth/callback"
-DEFAULT_HOME = Path.home() / ".local/share/condere-mda/chatgpt"
+DEFAULT_HOME = Path.home() / ".local/share/condere/chatgpt"
 PLAN_MODEL = "gpt-6.1-sol"
 # OpenAI's most capable model (reasoning and coding), the plan-route counterpart of Claude Opus
 # for code analysis. Owner direction 2026-10-30: run code analysis on ChatGPT plan usage after

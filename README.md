@@ -1,64 +1,139 @@
-# Condere: spin-off analysis on Deep Agents
+# Condere
 
-Condere takes a piece of digital intellectual property, usually software, and
-works out how to spin a business off it: open-source it, or build an open-core
-business on open-source capability. It returns a compact decision JSON that a
-coding agent (Codex or Claude Code) reads first, with links to the reasoning,
-evidence and build plan behind it.
+**The open-source spin-off analyst for your code.**
 
-Condere never builds, deploys, publishes, contacts anyone or makes the founder's
-decision. `MDA` is a project label, not LangChain's hosted Managed Deep Agents
-service.
+Point Condere at a software repository to explore whether it could become a business,
+who would pay, and what to build next. It inspects the code, gathers outside evidence,
+compares commercialization routes, and returns a **pursue-or-stop decision** with linked
+reasoning and a build plan your coding agent can read.
 
-## Start here
+[Get started](docs/self-hosting.md) · [Use with Claude Code or Codex](docs/mcp.md) ·
+[Architecture](docs/architecture.md) · [Report format](docs/report.md)
 
-- [Execution goal](goal.md): the spin-off objective, work order, completion
-  criteria and the owner's authority for unattended iteration.
-- [System design](system_design.md): architecture, contracts, storage and
-  security boundaries.
-- [Roadmap handoff](roadmap.md#current-handoff): what is done, measured results
-  and the next action.
-- [Infrastructure](infra/README.md): services, configuration and test commands.
+> **Developer preview.** The current local storage implementation uses MinIO.
+> Garage is the intended long-term self-hosted replacement; migration and clean-install
+> verification are still in progress. See [current limitations](docs/status.md).
 
-## How an assessment runs
+## From repository to business decision
 
-1. **Repository index.** Each admitted repository is indexed offline in SmolVM
-   (Graphify graph, manifests, deployment, license and CI facts) before any
-   model call.
-2. **Lead analysis.** A Deep Agent on GPT-6.1 Sol (the owner's ChatGPT plan)
-   plans the work and writes an `Analysis`: claims with evidence status, the
-   asset, rights, buyer, two to four spin-off options with the case for and
-   against, a next test and open questions. It delegates to:
-   - `code-analyst` (Claude Opus 5.5): reads code in the sandbox;
-   - `extractor` (Claude Haiku 5.5): reads and searches sources.
-   Both return structured claims with exact quotes.
-3. **Decision.** Jev (TypeSafe, via OpenRouter) reads a compact decision brief
-   and answers typed questions: per-option gates and ratings, then verdict,
-   option and route. Code enforces the gates and verdict rules and records every
-   adjustment.
-4. **Build plan.** For a chosen option, a short planner turns it into work
-   packages tied to real code paths.
-5. **Publish.** The compact `condere.spinoff.v1` JSON and its artifacts are saved
-   atomically and served by HTTP and MCP.
+Condere is for maintainers, technical founders, and teams evaluating software they
+might spin into a product. It considers routes such as open core, managed hosting,
+dual licensing, services, and AI-native offerings.
 
-Research uses Exa (with recency, live fetch, category and domain routing), live
-page crawling of admitted links, and Apify for X, Reddit and YouTube. Every model
-and research call goes through a spending ledger; quotes are verified against
-saved sources; traces go to LangSmith.
+- **Understand the asset.** Inspect admitted repository snapshots in an isolated sandbox
+  and connect the proposed business to actual code.
+- **Investigate the buyer.** Gather outside evidence, distinguish observations from
+  hypotheses, and preserve unanswered questions.
+- **Compare the options.** Explain what stays open, what customers pay for, who buys,
+  and the case for and against each route.
+- **Make a structured call.** A decision model answers typed questions; code applies
+  gates and records any adjustments to its answers.
+- **Hand off the findings.** Retrieve the compact result, follow links to supporting
+  evidence, or export the saved assessment without rerunning research.
 
-## Reading a result
+Quoted claims are checked against saved sources. That establishes quotation fidelity,
+not proof that a market exists. A recommendation does not authorize implementation,
+deployment, publication, outreach, or further spending.
 
-- `read_report`: the compact JSON (decision with probabilities, thesis and
-  summary, option cases, next test, build plan, open questions, links).
-  `format=markdown` returns a README.
-- `read_artifact`: linked detail by its `ref`, such as
-  `artifacts/reasoning.md`, `artifacts/claims.json` or
-  `artifacts/decision-brief.md`. Each link's hash matches the report.
-- `export_assessment`: a zip with the README, the JSON, every artifact and the
-  cited source texts.
+## What you get
 
-`codex/condere-spinoff` builds on `codex/condere-mda`. The earlier 26-question
-pipeline (question workers, screen, final review, HTML dossier) was retired from
-this branch on 2026-10-30. It is preserved at commit `e26d4b59` on
-`codex/condere-mda`, and its saved dossiers stay readable through that branch's
-API, not this one.
+The `condere.spinoff.v1` report includes:
+
+| Part | What it tells you |
+|---|---|
+| Decision | Pursue or stop, the selected option and route, probabilities, gates and adjustments |
+| Reasoning | The thesis and the case for and against the options |
+| Analysis | What the software does, rights and ownership questions, and buyer evidence |
+| Next test | The assumption to test, method, success/failure conditions, and estimated effort |
+| Build plan | Proposed capabilities and work packages tied to the software, when applicable |
+| Evidence | Links to claims, sources and detailed artifacts, with hashes and summaries |
+
+Start with the compact report and fetch only the detail you need. See the
+[report reference](docs/report.md) for the contract and retrieval workflow.
+
+## Get started
+
+You need Python 3.12 or 3.13, [uv](https://docs.astral.sh/uv/), PostgreSQL,
+an S3-compatible evidence store, and a supported sandbox backend. Research also
+requires OpenRouter and Exa credentials. Self-hosting storage avoids cloud storage
+charges; external model and research services can still incur costs.
+
+From the repository root:
+
+```sh
+uv sync --locked --group dev
+cp .env.example .env
+```
+
+Follow the [self-hosting guide](docs/self-hosting.md) to configure storage, prepare
+the sandbox, generate the API identity, and register an explicit research allowance.
+Once those prerequisites are complete, start the API:
+
+```sh
+uv run --env-file .env python scripts/run_local.py api
+```
+
+The local API uses bearer authentication at `http://127.0.0.1:7778`.
+Connect [Claude Code or Codex over MCP](docs/mcp.md), then use an authorized campaign
+to admit an assessment. `read_report` retrieves its saved result; `read_artifact`
+opens supporting detail and `export_assessment` saves a portable bundle.
+
+Configuration comes from environment variables. Doppler is optional, and LangSmith
+tracing is disabled when its API key is absent. See the
+[configuration reference](docs/configuration.md).
+
+## Local development and cloud deployment
+
+| Component | Local development | Cloud deployment |
+|---|---|---|
+| State and checkpoints | Self-hosted PostgreSQL, with separate databases and roles | PostgreSQL; the hosted deployment uses Neon |
+| Evidence objects | MinIO today; Garage is the long-term self-hosted target | S3-compatible storage; the hosted deployment uses Cloudflare R2 |
+| Code inspection | SmolVM; prior verification on macOS Apple silicon | Modal adapter |
+| Tracing | Optional LangSmith | Optional LangSmith |
+
+Garage is a planned replacement, not an available Compose setup in this checkout.
+The runtime uses an S3 interface so storage bindings can differ between environments;
+each backend still needs to pass the evidence-storage checks. **macOS on Apple
+silicon is the tested local platform. Windows and Linux are untested.**
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Repository and brief] --> B[Sandboxed inspection]
+    B --> C[Research and quoted evidence]
+    C --> D[Structured analysis]
+    D --> E[Typed decision and code-enforced gates]
+    E --> F[JSON report and linked artifacts]
+    F --> G[HTTP or MCP]
+```
+
+Condere runs on Deep Agents and LangGraph. PostgreSQL holds state, spending records
+and checkpoints; object storage retains source evidence. Sandboxes inspect code
+without network access or provider credentials. Model calls and evidence retrieval
+are handled by the trusted runtime. See [architecture](docs/architecture.md).
+
+The runtime supports OpenAI plan sign-in or OpenRouter for analysis, TypeSafe Jev
+through OpenRouter for decisions, and Exa for search. Apify enables optional research
+sources. Self-hosted storage does not make external model processing local; review
+[data boundaries](SECURITY.md#data-boundaries) before submitting private material.
+
+## Open core
+
+The runtime, agent prompts, skills and self-hosting adapters in this repository are
+[MIT licensed](LICENSE). Commercial features are licensed separately and are not
+included here. Private production configuration, evaluation datasets and improvement
+routines are maintained outside the public core. See [licensing](docs/licensing.md).
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for development and verification guidance.
+Provider-free checks run without service credentials:
+
+```sh
+uv run ruff check src scripts tests
+uv run pytest tests -q
+```
+
+Integration tests are opt-in. Report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md).

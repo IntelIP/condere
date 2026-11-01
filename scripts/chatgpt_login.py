@@ -2,14 +2,16 @@
 
 Usage: uv run python scripts/chatgpt_login.py [login|status|logout]
 
-Credentials stay in ~/.local/share/condere-mda/chatgpt with owner-only permissions.
+Credentials stay in ~/.local/share/condere/chatgpt with owner-only permissions.
 They are never written to Doppler, the repository, logs, or traces.
 """
 
 import argparse
 import functools
 import json
+import os
 import sys
+from pathlib import Path
 
 from condere.runtime.chatgpt_plan import USAGE_URL, PlanCredentials, SignInRequired, sign_in
 
@@ -20,7 +22,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="login", choices=("login", "status", "logout"))
     args = parser.parse_args()
-    credentials = PlanCredentials()
+    credentials = (
+        PlanCredentials(Path(os.environ["CONDERE_CHATGPT_HOME"]))
+        if os.environ.get("CONDERE_CHATGPT_HOME")
+        else PlanCredentials()
+    )
     if args.action == "status":
         print(json.dumps(credentials.status(), indent=2))
         return

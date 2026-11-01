@@ -45,7 +45,6 @@ REQUIRED = (
     "CONDERE_EVIDENCE_BUCKET",
     "CONDERE_ARTIFACT_DIRECTORY",
     "EXA_API_KEY",
-    "LANGSMITH_API_KEY",
     # Claude subagents and the Jev decision run through OpenRouter in every mode.
     "CONDERE_OPENROUTER_API_KEY",
 )
@@ -66,6 +65,7 @@ DATABASE = ("CONDERE_DATABASE_DIRECT_URL",)
 EXECUTOR = ("CONDERE_EXECUTOR", "CONDERE_CLOUD_RUN_JOB")
 # Trace destination: LANGSMITH_PROJECT, or LANGSMITH_AGENT_ID with LANGSMITH_AGENT_ENVIRONMENT.
 TRACING = (
+    "LANGSMITH_API_KEY",
     "LANGSMITH_PROJECT",
     "LANGSMITH_AGENT_ID",
     "LANGSMITH_AGENT_ENVIRONMENT",
@@ -212,7 +212,8 @@ def build_app():
         )
     except BaseException:
         objects.close()
-        tracing.close()
+        if tracing is not None:
+            tracing.close()
         raise
 
     application_lifespan = app.router.lifespan_context
@@ -224,7 +225,8 @@ def build_app():
                 yield
         finally:
             objects.close()
-            await asyncio.to_thread(tracing.close)
+            if tracing is not None:
+                await asyncio.to_thread(tracing.close)
             if launcher is not None:
                 await launcher.close()
 

@@ -5,8 +5,8 @@ import json
 import os
 from pathlib import Path
 
-ROOT = Path.home() / ".local/share/condere-mda/evidence-store"
-BINARY = Path.home() / ".local/share/condere-mda/minio/bin/minio"
+ROOT = Path.home() / ".local/share/condere/evidence-store"
+BINARY = Path.home() / ".local/share/condere/minio/bin/minio"
 ENDPOINT = "http://127.0.0.1:19000"
 
 

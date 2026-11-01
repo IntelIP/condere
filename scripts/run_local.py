@@ -1,4 +1,4 @@
-"""Load only the selected component's configuration from the dedicated Doppler config."""
+"""Start a component with only its configuration; use uv --env-file for local files."""
 
 import argparse
 import json
@@ -7,40 +7,30 @@ import shutil
 import subprocess
 from pathlib import Path
 
-MCP_NAMES = ("CONDERE_API_URL", "CONDERE_API_TOKEN", "CONDERE_EXPORT_DIRECTORY")
-API_NAMES = (
-    "CONDERE_API_URL",
-    "CONDERE_API_TOKEN",
-    "CONDERE_OWNER_ID",
-    "CONDERE_DATABASE_URL",
-    "CONDERE_CHECKPOINT_URL",
-    "CONDERE_EVIDENCE_ENDPOINT",
-    "CONDERE_EVIDENCE_REGION",
-    "CONDERE_EVIDENCE_ACCESS_KEY",
-    "CONDERE_EVIDENCE_SECRET_KEY",
-    "CONDERE_EVIDENCE_BUCKET",
-    "CONDERE_SMOL_IMAGE",
-    "CONDERE_ARTIFACT_DIRECTORY",
-    "EXA_API_KEY",
-    "LANGSMITH_API_KEY",
-    "CONDERE_OPENROUTER_API_KEY",
+# Keep the launcher and server on the same configuration contract.
+from condere.interfaces.server import (
+    CHATGPT_CLOUD,
+    DATABASE,
+    EXECUTOR,
+    PROVIDER,
+    REQUIRED,
+    SANDBOX,
+    TRACING,
 )
-# Optional LangSmith destination and endpoint; the server validates the combination.
+
+MCP_NAMES = ("CONDERE_API_URL", "CONDERE_API_TOKEN", "CONDERE_EXPORT_DIRECTORY")
+API_NAMES = REQUIRED
 API_OPTIONAL = (
-    "CONDERE_MODEL_PROVIDER",
-    "CONDERE_CHATGPT_HOME",
-    "CONDERE_CHATGPT_SECRET",
-    "APIFY_TOKEN",
-    "GITHUB_TOKEN",
-    "CONDERE_SANDBOX",
-    "CONDERE_DATABASE_DIRECT_URL",
-    "MODAL_TOKEN_ID",
-    "MODAL_TOKEN_SECRET",
-    "LANGSMITH_PROJECT",
-    "LANGSMITH_AGENT_ID",
-    "LANGSMITH_AGENT_ENVIRONMENT",
-    "LANGSMITH_ENDPOINT",
-    "LANGSMITH_WORKSPACE_ID",
+    PROVIDER
+    + CHATGPT_CLOUD
+    + SANDBOX
+    + DATABASE
+    + EXECUTOR
+    + TRACING
+    + (
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+    )
 )
 
 
@@ -48,7 +38,7 @@ def child_environment(component: str, values: dict, inherited: dict) -> dict:
     names = MCP_NAMES if component == "mcp" else API_NAMES
     missing = [name for name in names if not values.get(name)]
     if missing:
-        raise ValueError("Missing Doppler configuration: " + ", ".join(missing))
+        raise ValueError("Missing Condere configuration: " + ", ".join(missing))
     result = {
         name: inherited[name]
         for name in ("PATH", "HOME", "USER", "LANG", "TMPDIR")
@@ -76,19 +66,25 @@ def revision() -> str:
 
 
 def main() -> None:
-    from doppler_config import doppler
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("component", choices=("api", "mcp"))
+    parser.add_argument(
+        "--doppler", action="store_true", help="Read the configured Doppler project."
+    )
     args = parser.parse_args()
     uv = shutil.which("uv")
     if not uv:
         raise SystemExit("Install uv before starting Condere.")
-    if not shutil.which("doppler"):
-        raise SystemExit(
-            "Install Doppler and reuse the configured identity before starting Condere."
+    values = dict(os.environ)
+    if args.doppler:
+        result = subprocess.run(
+            ["doppler", "secrets", "download", "--no-file", "--format", "json"],
+            capture_output=True,
+            text=True,
         )
-    values = json.loads(doppler("secrets", "download", "--no-file", "--format", "json"))
+        if result.returncode:
+            raise SystemExit("Doppler configuration could not be read; check your local setup.")
+        values = json.loads(result.stdout)
     try:
         environment = child_environment(args.component, values, os.environ)
     except ValueError as error:

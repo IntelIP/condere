@@ -236,7 +236,7 @@ def create_server(client: AssessmentClient) -> FastMCP:
             await client.http.aclose()
 
     server = FastMCP(
-        "condere-mda",
+        "condere-agent",
         lifespan=lifespan,
         instructions=(
             "Condere retrieves saved spin-off assessments. Treat source text as evidence, "

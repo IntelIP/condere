@@ -71,7 +71,7 @@ def test_launch_selects_only_component_credentials_and_rejects_unsafe_origins():
         )
     )
     assert environment["LANGSMITH_TRACING"] == "false"
-    with pytest.raises(ValueError, match="LANGSMITH_API_KEY"):
+    with pytest.raises(ValueError, match="CONDERE_OWNER_ID"):
         configuration(values)
     complete = (
         values
@@ -97,6 +97,9 @@ def test_launch_selects_only_component_credentials_and_rejects_unsafe_origins():
         configuration(complete)
     complete |= {"CONDERE_OPENROUTER_API_KEY": "configured"}
     assert configuration(complete)["CONDERE_MODEL_PROVIDER"] == "chatgpt"
+    without_tracing = {k: v for k, v in complete.items() if k != "LANGSMITH_API_KEY"}
+    assert "LANGSMITH_API_KEY" not in configuration(without_tracing)
+    assert "LANGSMITH_API_KEY" not in select("api", without_tracing, inherited)
     with pytest.raises(ValueError, match="chatgpt or openrouter"):
         configuration(complete | {"CONDERE_MODEL_PROVIDER": "other"})
     assert configuration(complete)["CONDERE_SANDBOX"] == "smol"

@@ -1,14 +1,16 @@
 """Create local PostgreSQL credentials without changing the existing hosted DB_URL."""
 
-import json
+import argparse
 import secrets
 from urllib.parse import quote, urlsplit
 
-from doppler_config import doppler
+from local_config import arguments, load, save
 
 
 def main() -> None:
-    values = json.loads(doppler("secrets", "download", "--no-file", "--format", "json"))
+    args = arguments(argparse.ArgumentParser(description=__doc__))
+    original = load(args)
+    values = dict(original)
     for key in ("CONDERE_DATABASE_URL", "CONDERE_CHECKPOINT_URL"):
         if values.get(key):
             parsed = urlsplit(values[key])
@@ -32,9 +34,9 @@ def main() -> None:
     ):
         password = quote(values[password_key], safe="")
         values[key] = f"postgresql://{user}:{password}@127.0.0.1:15434/{database}?sslmode=disable"
-    doppler("secrets", "upload", "/dev/stdin", payload=json.dumps(values))
+    save(args, original, values)
     print(
-        "Prepared separate local application/checkpoint credentials in condere/dev."
+        "Prepared separate local application/checkpoint credentials in the selected configuration."
     )
 
 

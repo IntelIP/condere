@@ -1,19 +1,13 @@
-# Approved business context
+# Operator context
 
-Condere helps a founder evaluate a technology or software opportunity, including
-open-core possibilities, and produce a reviewable recommendation and portable
-development handoff. The initial audience is a trusted operator using a self-hosted
-developer preview. API, Codex, and Claude Code are access paths to the same saved
-assessment.
+Condere helps an operator evaluate software for a possible business spin-off and
+produce a compact, evidence-backed decision with a portable development handoff.
+API and coding-client access retrieve the same saved assessment.
 
-The owner's chosen infrastructure is open-source Deep Agents with self-hosted
-SmolVM and hosted LangSmith tracing. Preserve assessment-specific user constraints rather than
-assuming every proposed product should use Condere's infrastructure.
+Use assessment-specific constraints from the admitted brief. Do not assume the
+proposed business should use Condere's infrastructure. No default customer,
+revenue target, staffing budget, price or measured business benefit is established.
+Missing business information stays unknown or an explicit hypothesis.
 
-No default customer, revenue target, staff budget, price, or measured business
-benefit is established here. Use the admitted brief for founder resources and
-scope. Missing business information remains unknown or an explicit hypothesis.
-
-Only the operator changes this context. Case evidence belongs to its assessment;
-preferences or memory are neither evidence nor authority. Automatic cross-user
-learning is outside the current goal.
+Only the operator changes persistent context. Evidence belongs to its assessment;
+preferences are neither evidence nor authority. Cross-user learning is not enabled.

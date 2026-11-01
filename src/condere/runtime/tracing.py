@@ -48,9 +48,9 @@ class Tracing:
         self.destination = {"address": address} if address else {"project_name": project}
 
     @classmethod
-    def from_environment(cls, environment: Mapping[str, str], *, release: str) -> "Tracing":
+    def from_environment(cls, environment: Mapping[str, str], *, release: str) -> "Tracing | None":
         if not environment.get("LANGSMITH_API_KEY"):
-            raise ValueError("Missing Condere runtime configuration: LANGSMITH_API_KEY")
+            return None
         agent = environment.get("LANGSMITH_AGENT_ID")
         stage = environment.get("LANGSMITH_AGENT_ENVIRONMENT")
         project = environment.get("LANGSMITH_PROJECT")

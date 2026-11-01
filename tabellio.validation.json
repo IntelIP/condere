@@ -1,0 +1,108 @@
+{
+  "schemaVersion": "tabellio-validation/v0.2",
+  "id": "condere-public-preview",
+  "failFast": false,
+  "requireEntireCheckpoint": false,
+  "acceptance": {
+    "id": "condere-public-preview-v1",
+    "source": "README.md, docs/status.md and existing provider-free regression tests",
+    "risk": "high",
+    "outcomes": [
+      "The published core preserves the tested report, decision and client-boundary contracts.",
+      "Environment setup accepts keyless tracing without leaking provider secrets to MCP.",
+      "Private operational paths do not enter the public tree."
+    ],
+    "invariants": [
+      "Validation invokes no live model or research provider.",
+      "Integration skips are reported and are not evidence of live product operation."
+    ],
+    "forbiddenOutcomes": [
+      "A failed check is represented as passing.",
+      "Private production configuration or credentials are published."
+    ],
+    "requiredValidatorTypes": [
+      "static"
+    ]
+  },
+  "validators": [
+    {
+      "id": "lint",
+      "type": "static",
+      "required": true,
+      "argv": [
+        "uv",
+        "run",
+        "ruff",
+        "check",
+        "src",
+        "scripts",
+        "tests"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "evidence": null,
+      "policy": {
+        "metricThresholds": [],
+        "maxCostUsd": null,
+        "requireCostTelemetry": false
+      }
+    },
+    {
+      "id": "provider-free-regressions",
+      "type": "static",
+      "required": true,
+      "argv": [
+        "uv",
+        "run",
+        "pytest",
+        "tests",
+        "-q",
+        "--junitxml=.artifacts/validation/tests.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "evidence": null,
+      "policy": {
+        "metricThresholds": [],
+        "maxCostUsd": null,
+        "requireCostTelemetry": false
+      }
+    },
+    {
+      "id": "public-path-boundary",
+      "type": "static",
+      "required": true,
+      "argv": [
+        "uv",
+        "run",
+        "python",
+        "scripts/check_public_tree.py"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "evidence": null,
+      "policy": {
+        "metricThresholds": [],
+        "maxCostUsd": null,
+        "requireCostTelemetry": false
+      }
+    },
+    {
+      "id": "dead-code",
+      "type": "static",
+      "required": true,
+      "argv": [
+        "bash",
+        "scripts/check-dead-code.sh"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "evidence": null,
+      "policy": {
+        "metricThresholds": [],
+        "maxCostUsd": null,
+        "requireCostTelemetry": false
+      }
+    }
+  ]
+}

@@ -20,7 +20,8 @@ async def run(values: dict, owner: str, assessment_id: str, resume: bool) -> Non
     finally:
         objects.close()
         # A job's container exits when this returns; flush traces first or they are lost.
-        await asyncio.to_thread(tracing.close)
+        if tracing is not None:
+            await asyncio.to_thread(tracing.close)
 
 
 def main(argv: list[str] | None = None) -> None:

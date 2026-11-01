@@ -35,7 +35,6 @@ def configured(**values):
 @pytest.mark.parametrize(
     "environment",
     [
-        {"LANGSMITH_PROJECT": "condere-dev"},
         configured(),
         configured(LANGSMITH_AGENT_ID="condere"),
         configured(LANGSMITH_PROJECT="condere-dev", LANGSMITH_AGENT_ID="condere"),
@@ -107,3 +106,12 @@ def test_status_distinguishes_pending_from_unavailable(monkeypatch, sent):
 
     monkeypatch.setattr(type(tracing.client), "read_run", broken)
     assert tracing.status("trace") == ("unavailable", "ConnectionError")
+
+
+def test_tracing_is_optional_without_a_key(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Disabled tracing must not construct a client")
+
+    monkeypatch.setattr(tracing_module, "Client", forbidden)
+    assert Tracing.from_environment({}, release="v1") is None
+    assert Tracing.from_environment({"LANGSMITH_PROJECT": "unused"}, release="v1") is None
