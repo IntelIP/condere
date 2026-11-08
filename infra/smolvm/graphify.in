@@ -1,2 +1,2 @@
 # Install without the full parser catalog; supported parser dependencies are locked separately.
-graphifyy==0.9.32
+graphifyy==0.9.103
